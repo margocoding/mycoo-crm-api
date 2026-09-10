@@ -1,7 +1,20 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { Expose } from "class-transformer";
+import type { DiagnosticsAnalysis } from "../../gigachat/gigachat.service.js";
 
 export class WorkspaceRdo {
+  @ApiProperty({ example: 1 })
+  @Expose()
+  onboardingStep!: number;
+
+  @ApiPropertyOptional({ type: Object, nullable: true })
+  @Expose()
+  diagnosticsAnalysis?: DiagnosticsAnalysis | null;
+
+  @ApiPropertyOptional({ type: [Object] })
+  @Expose()
+  diagnosticsAnswers?: Array<{ questionId: string; opt: number | null; text: string | null; skip: boolean }>;
+
   @ApiProperty({
     example: "ckg5z6j000000l5b7v9x8y2z1",
     description: "Идентификатор workspace",
@@ -107,4 +120,10 @@ export class WorkspaceRdo {
   @ApiPropertyOptional({ type: String, format: "date-time" })
   @Expose()
   trialStartedAt?: Date | null;
+}
+
+export class CompletedWorkspaceRdo extends WorkspaceRdo {
+  @ApiProperty({ example: true })
+  @Expose()
+  success!: boolean;
 }

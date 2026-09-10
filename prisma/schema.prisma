@@ -58,6 +58,9 @@ model Workspace {
   // Статусы
   onboardingComplete Boolean @default(false) @map("onboarding_complete")
   diagnosticsComplete Boolean @default(false) @map("diagnostics_complete")
+  onboardingStep    Int @default(0) @map("onboarding_step")
+  diagnosticsAnalysis Json? @map("diagnostics_analysis")
+  diagnosticsProcessingAt DateTime? @map("diagnostics_processing_at")
   isActive          Boolean  @default(false) @map("is_active")
   
   // Даты

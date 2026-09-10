@@ -1,6 +1,5 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
-import { APP_GUARD } from "@nestjs/core";
 import { PrismaModule } from "../prisma/prisma.module.js";
 import { RedisModule } from "./redis/redis.module.js";
 import { MailModule } from "./mail/mail.module.js";

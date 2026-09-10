@@ -1,9 +1,10 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
+import { Transform } from "class-transformer";
 import {
   IsEmail,
   IsOptional,
   IsString,
-  IsUrl,
+  IsIn,
   Length,
   Matches,
 } from "class-validator";
@@ -27,6 +28,7 @@ export class CompleteOnboardingDto {
   })
   @IsString({ message: "Отрасль должна быть строкой." })
   @Length(1, 100, { message: "Отрасль должна быть от 1 до 100 символов." })
+  @IsIn(["IT и SaaS", "Ритейл и e-commerce", "Производство", "Услуги и B2B", "Финансы", "Строительство", "Логистика", "Другое"], { message: "Выберите отрасль из списка." })
   readonly industry!: string;
 
   @ApiPropertyOptional({
@@ -49,6 +51,7 @@ export class CompleteOnboardingDto {
   @Matches(SITE_RE, {
     message: "Похоже, адрес сайта некорректен — пример: company.ru",
   })
+  @Transform(({ value }) => typeof value === "string" ? value.trim() || undefined : value)
   readonly site?: string;
 
   @ApiProperty({
@@ -59,6 +62,7 @@ export class CompleteOnboardingDto {
   @Length(1, 50, {
     message: "Количество сотрудников должно быть от 1 до 50 символов.",
   })
+  @IsIn(["1–5", "6–20", "21–50", "51–200", "200+"], { message: "Выберите количество сотрудников." })
   readonly employees!: string;
 
   @ApiProperty({
@@ -69,6 +73,7 @@ export class CompleteOnboardingDto {
   @Length(1, 50, {
     message: "Количество руководителей должно быть от 1 до 50 символов.",
   })
+  @IsIn(["1", "2–3", "4–10", "10+"], { message: "Выберите количество руководителей." })
   readonly managers!: string;
 
   @ApiPropertyOptional({
@@ -88,6 +93,7 @@ export class CompleteOnboardingDto {
   @Length(1, 50, {
     message: "Стадия бизнеса должна быть от 1 до 50 символов.",
   })
+  @IsIn(["startup", "growth", "mature", "transform"], { message: "Выберите стадию бизнеса." })
   readonly stage!: string;
 
   @ApiProperty({
@@ -106,6 +112,7 @@ export class CompleteOnboardingDto {
   @Length(1, 100, {
     message: "Должность должна быть от 1 до 100 символов.",
   })
+  @IsIn(["Собственник", "Основатель", "Генеральный директор", "Управляющий партнёр", "Другое"], { message: "Выберите вашу роль." })
   readonly ownerRole!: string;
 
   @ApiPropertyOptional({
@@ -126,6 +133,7 @@ export class CompleteOnboardingDto {
   @IsEmail({}, {
     message: "Email для связи не распознан.",
   })
+  @Transform(({ value }) => typeof value === "string" ? value.trim() : value)
   readonly ownerEmail!: string;
 
   @ApiProperty({

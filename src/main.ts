@@ -23,12 +23,15 @@ async function bootstrap() {
       forbidNonWhitelisted: true,
       transform: true,
       exceptionFactory: (errors: ValidationError[]) => {
-        const formattedErrors = errors.map((error) => ({
-          property: error.property,
-          messages: error.constraints
-            ? Object.values(error.constraints)
-            : [],
-        }));
+        const flatten = (items: ValidationError[], prefix = ""): Array<{ property: string; messages: string[] }> =>
+          items.flatMap((error) => {
+            const property = prefix ? `${prefix}.${error.property}` : error.property;
+            return [
+              ...(error.constraints ? [{ property, messages: Object.values(error.constraints) }] : []),
+              ...flatten(error.children ?? [], property),
+            ];
+          });
+        const formattedErrors = flatten(errors);
 
         return new BadRequestException({
           statusCode: 400,
@@ -52,7 +55,9 @@ async function bootstrap() {
 
   SwaggerModule.setup("swagger", app, document);
 
-  await app.listen(Number(process.env.PORT ?? 3001));
+  const port = Number(process.env.PORT ?? 3001);
+  if (process.env.HOST) await app.listen(port, process.env.HOST);
+  else await app.listen(port);
 }
 
 bootstrap();
