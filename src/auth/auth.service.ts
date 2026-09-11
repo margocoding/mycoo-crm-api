@@ -26,6 +26,7 @@ import { LoginUserDto } from "./dto/login-user.dto.js";
 import { ResendCodeDto } from "./dto/resend-code.dto.js";
 import { UserRdo } from "./rdo/user.rdo.js";
 import { User } from "../../generated/prisma/client.js";
+import { VerifyCodeDto } from "./dto/verify-code.dto.js";
 
 @Injectable()
 export class AuthService {
@@ -85,12 +86,18 @@ export class AuthService {
     });
   }
 
+  async verifyCode(dto: VerifyCodeDto) {
+    const email = this.normalizeEmail(dto.email);
+    const user = await this.prisma.user.findUnique({ where: { email }, select: { id: true } });
+    // The final login/register request checks the same code again and consumes it.
+    await this.verifyConfirmationCode(email, dto.code, user ? "login" : "register");
+    return { success: true };
+  }
+
   async register(dto: RegisterUserDto): Promise<AuthRdo> {
     const email = this.normalizeEmail(dto.email);
 
     await this.verifyConfirmationCode(email, dto.code, "register");
-
-    await this.redis.delete(AUTH_REDIS_KEYS.code(email));
 
     const existing = await this.prisma.user.findUnique({
       where: { email },
@@ -112,6 +119,8 @@ export class AuthService {
       },
     });
 
+    await this.redis.delete(AUTH_REDIS_KEYS.code(email));
+
     this.logger.log(`User registered: ${maskEmail(email)}`);
 
     return this.buildAuthRdo(user);
@@ -130,7 +139,7 @@ export class AuthService {
       );
     }
 
-    await this.verifyConfirmationCode(email, dto.code, "login");
+    const codeHash = await this.verifyConfirmationCode(email, dto.code, "login");
 
     const passwordValid = await this.comparePassword(
       dto.password,
@@ -141,6 +150,7 @@ export class AuthService {
       const blocked = await this.registerFailedCodeAttempt(
         email,
         "login",
+        codeHash,
       );
 
       if (blocked) {
@@ -275,7 +285,7 @@ export class AuthService {
     email: string,
     code: string,
     purpose: ConfirmationPurpose,
-  ): Promise<void> {
+  ): Promise<string> {
     const key = AUTH_REDIS_KEYS.code(email);
 
     const record = await this.redis.getJson<ConfirmationCodeRecord>(key);
@@ -302,6 +312,7 @@ export class AuthService {
       const blocked = await this.registerFailedCodeAttempt(
         email,
         purpose,
+        record.codeHash,
       );
 
       if (blocked) {
@@ -318,33 +329,18 @@ export class AuthService {
         "Код не совпадает. Проверьте письмо и повторите ввод.",
       );
     }
+    return record.codeHash;
   }
 
   private async registerFailedCodeAttempt(
     email: string,
     purpose: ConfirmationPurpose,
+    codeHash: string,
   ): Promise<boolean> {
     const key = AUTH_REDIS_KEYS.code(email);
-
-    const record = await this.redis.getJson<ConfirmationCodeRecord>(key);
-
-    if (!record || record.purpose !== purpose) {
-      return false;
-    }
-
-    const attempts = record.attempts + 1;
-
-    const ttl = await this.redis.ttl(key);
-
-    await this.redis.setJson(
-      key,
-      {
-        ...record,
-        attempts,
-      },
-      ttl > 0 ? ttl : this.codeTtlSeconds,
-    );
-
+    const attempts = await this.redis.incrementCodeAttempts(key, purpose, codeHash);
+    if (attempts === null)
+      throw new BadRequestException("Код не найден или истёк. Запросите новый.");
     return attempts >= this.maxCodeAttempts;
   }
 

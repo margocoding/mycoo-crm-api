@@ -26,6 +26,7 @@ import { LoginUserDto } from "./dto/login-user.dto.js";
 import { ResendCodeDto } from "./dto/resend-code.dto.js";
 import { JwtAuthGuard } from "./jwt-auth.guard.js";
 import { UserRdo } from "./rdo/user.rdo.js";
+import { VerifyCodeDto } from "./dto/verify-code.dto.js";
 
 interface AuthenticatedRequest extends Request {
   user?: JwtPayload;
@@ -49,6 +50,13 @@ export class AuthController {
   })
   checkEmail(@Body() dto: CheckEmailDto) {
     return this.authService.checkEmail(dto);
+  }
+
+  @Post("verify-code")
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: "Проверить код перед вводом пароля" })
+  verifyCode(@Body() dto: VerifyCodeDto) {
+    return this.authService.verifyCode(dto);
   }
 
   @Post("register")

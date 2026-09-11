@@ -23,6 +23,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       this.logger.log('✅ Prisma Client successfully connected via Driver Adapter.');
     } catch (error) {
       this.logger.error('❌ Failed to connect to the database', error);
+      throw error;
     }
   }
 

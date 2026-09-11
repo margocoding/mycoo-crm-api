@@ -57,6 +57,25 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return this.client.ttl(key);
   }
 
+  async incrementCodeAttempts(
+    key: string,
+    purpose: string,
+    codeHash: string,
+  ): Promise<number | null> {
+    const attempts = Number(await this.client.eval(`
+      local raw = redis.call('GET', KEYS[1])
+      if not raw then return -1 end
+      local record = cjson.decode(raw)
+      if record.purpose ~= ARGV[1] or record.codeHash ~= ARGV[2] then return -1 end
+      local ttl = redis.call('PTTL', KEYS[1])
+      if ttl <= 0 then return -1 end
+      record.attempts = record.attempts + 1
+      redis.call('SET', KEYS[1], cjson.encode(record), 'PX', ttl)
+      return record.attempts
+    `, 1, key, purpose, codeHash));
+    return attempts < 0 ? null : attempts;
+  }
+
   async setNxEx(key: string, ttlSeconds: number): Promise<boolean> {
     const result = await this.client.set(
       key,
