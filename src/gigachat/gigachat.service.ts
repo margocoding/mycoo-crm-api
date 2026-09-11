@@ -167,6 +167,7 @@ export class GigachatService {
             ' failed: ' +
             failure.message,
         );
+        this.logger.error('Diagnostics error', error)
         if (!retryable || attempt === retries) break;
         const waitMs = Math.max(
           failure.retryAfterMs,
