@@ -13,7 +13,7 @@
     "start": "nest start",
     "start:dev": "cross-env NODE_EXTRA_CA_CERTS=./certs/russian_trusted_root_ca_pem.crt nest start --watch",
     "start:debug": "cross-env NODE_EXTRA_CA_CERTS=./certs/russian_trusted_root_ca_pem.crt nest start --debug --watch",
-    "start:prod": "node dist/src/main.js",
+    "start:prod": "cross-env NODE_EXTRA_CA_CERTS=./certs/russian_trusted_root_ca_pem.crt node dist/src/main.js",
     "lint": "oxlint src/ test/",
     "test": "vitest run",
     "test:watch": "vitest",
