@@ -26,7 +26,7 @@ export const DIAGNOSTICS_QUESTIONS: DiagnosticsQuestion[] = [
     options: [
       { text: "В памяти и переписке", score: 0.2 },
       { text: "В таблицах", score: 0.5 },
-      { text: "В таск-системе", score: 0.85 },
+      { text: "В CRM-системе", score: 0.85 },
       { text: "В единой системе компании", score: 1 },
     ],
   },
