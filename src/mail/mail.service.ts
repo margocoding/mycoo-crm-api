@@ -60,7 +60,7 @@ export class MailService {
     }
 
     await this.transporter.sendMail({
-      from: this.config.get("MAIL_FROM", "MyCOO <no-reply@mycoo.ru>"),
+      from: this.config.get("MAIL_FROM", "MyCOO <no-reply@mycoo.io>"),
       to: email,
       subject,
       text,
