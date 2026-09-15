@@ -214,7 +214,7 @@ export class AuthService {
     });
   }
 
-  private async buildAuthRdo(user: User): Promise<AuthRdo> {
+  async buildAuthRdo(user: User): Promise<AuthRdo> {
     const payload: JwtPayload = {
       sub: user.id,
       email: user.email,
@@ -348,11 +348,11 @@ export class AuthService {
     return createHash("sha256").update(password).digest("base64");
   }
 
-  private async hashPassword(password: string): Promise<string> {
+  async hashPassword(password: string): Promise<string> {
     return bcrypt.hash(this.preparePassword(password), this.bcryptRounds);
   }
 
-  private async comparePassword(
+  async comparePassword(
     password: string,
     passwordHash: string,
   ): Promise<boolean> {

@@ -16,6 +16,10 @@ export class UserRdo {
   @Expose()
   email!: string;
 
+  @ApiProperty({ required: false, nullable: true })
+  @Expose()
+  name?: string | null;
+
   @ApiProperty({
     example: true,
     description: "Признак подтверждённого email",

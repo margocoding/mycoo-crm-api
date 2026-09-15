@@ -1,0 +1,332 @@
+import {
+  BadRequestException, ConflictException, ForbiddenException, GoneException,
+  HttpException, Injectable, NotFoundException,
+} from '@nestjs/common';
+import { createHash, randomBytes } from 'node:crypto';
+import { PrismaService } from '../../prisma/prisma.service.js';
+import type { Prisma } from '../../generated/prisma/client.js';
+import { DepartmentRole, WorkspaceRole } from '../../generated/prisma/enums.js';
+import { AuthService } from '../auth/auth.service.js';
+import { RedisService } from '../redis/redis.service.js';
+import type { DepartmentDto, InvitationDto } from './dto/team.dto.js';
+
+const invitationSelect = {
+  id: true, email: true, name: true, role: true, departmentId: true,
+  expiresAt: true, createdAt: true,
+} as const;
+
+@Injectable()
+export class TeamService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auth: AuthService,
+    private readonly redis: RedisService,
+  ) {}
+
+  private async workspace(db: Prisma.TransactionClient, userId: string, id: string) {
+    const workspace = await db.workspace.findFirst({
+      where: { id, OR: [{ ownerId: userId }, { members: { some: { userId } } }] },
+    });
+    if (!workspace) throw new NotFoundException('Компания не найдена.');
+    return workspace;
+  }
+
+  private async access(db: Prisma.TransactionClient, userId: string, workspaceId: string, departmentId: string) {
+    const workspace = await this.workspace(db, userId, workspaceId);
+    const department = await db.department.findFirst({
+      where: { id: departmentId, workspaceId },
+      include: { members: { where: { userId }, select: { role: true } } },
+    });
+    if (!department) throw new NotFoundException('Департамент не найден.');
+    const role = department.members[0]?.role;
+    const isOwner = workspace.ownerId === userId;
+    if (!isOwner && role !== DepartmentRole.CHIEF && role !== DepartmentRole.ADMIN)
+      throw new ForbiddenException('Управление командой доступно начальнику и администратору.');
+    return { workspace, department, canAssignChief: isOwner || role === DepartmentRole.CHIEF };
+  }
+
+  // Serialize membership changes and invite acceptance in the same workspace.
+  private transaction<T>(workspaceId: string, action: (tx: Prisma.TransactionClient) => Promise<T>) {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', 'team:' + workspaceId);
+      return action(tx);
+    });
+  }
+
+  async getTeam(userId: string, workspaceId: string) {
+    const workspace = await this.workspace(this.prisma, userId, workspaceId);
+    const isOwner = workspace.ownerId === userId;
+    const rows = await this.prisma.department.findMany({
+      where: { workspaceId, ...(isOwner ? {} : { members: { some: { userId } } }) },
+      include: { members: { where: { userId }, select: { role: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+    const departments = rows.map(({ members, ...d }) => ({
+      ...d,
+      myRole: members[0]?.role ?? null,
+      canManage: isOwner || members.some((m) => m.role !== DepartmentRole.WORKER),
+      canAssignChief: isOwner || members.some((m) => m.role === DepartmentRole.CHIEF),
+    }));
+    const managedIds = departments.filter((d) => d.canManage).map((d) => d.id);
+    const [memberships, invitations] = await Promise.all([
+      this.prisma.departmentMember.findMany({
+        where: {
+          departmentId: { in: departments.map((d) => d.id) },
+          OR: [{ userId }, { departmentId: { in: managedIds } }],
+        },
+        select: {
+          role: true, user: { select: { id: true, email: true, name: true } },
+          department: { select: { id: true, name: true } },
+        },
+        orderBy: { user: { email: 'asc' } },
+      }),
+      this.prisma.teamInvitation.findMany({
+        where: { departmentId: { in: managedIds }, acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } },
+        select: invitationSelect, orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+    const members = new Map<string, {
+      id: string; email: string; name: string;
+      departments: Array<{ id: string; name: string; role: DepartmentRole }>;
+    }>();
+    for (const { user, department, role } of memberships) {
+      const row = members.get(user.id) ?? {
+        ...user,
+        name: user.name || (user.id === workspace.ownerId ? workspace.ownerName : null) || user.email,
+        departments: [],
+      };
+      row.departments.push({ ...department, role });
+      members.set(user.id, row);
+    }
+    return { workspaceId, isOwner, departments, members: [...members.values()], invitations };
+  }
+
+  async createDepartment(userId: string, workspaceId: string, dto: DepartmentDto) {
+    return this.transaction(workspaceId, async (tx) => {
+      const workspace = await this.workspace(tx, userId, workspaceId);
+      if (workspace.ownerId !== userId) throw new ForbiddenException('Департаменты создаёт владелец компании.');
+      if (!workspace.diagnosticsComplete || !workspace.isActive)
+        throw new BadRequestException('Сначала завершите диагностику компании.');
+      await this.checkName(tx, workspaceId, dto.name);
+      return tx.department.create({
+        data: { workspaceId, name: dto.name, description: dto.description || null,
+          members: { create: { userId, role: DepartmentRole.CHIEF } } },
+      });
+    });
+  }
+
+  async editDepartment(userId: string, workspaceId: string, id: string, dto: DepartmentDto) {
+    return this.transaction(workspaceId, async (tx) => {
+      await this.access(tx, userId, workspaceId, id);
+      await this.checkName(tx, workspaceId, dto.name, id);
+      return tx.department.update({ where: { id }, data: { name: dto.name, description: dto.description || null } });
+    });
+  }
+
+  private async checkName(tx: Prisma.TransactionClient, workspaceId: string, name: string, exceptId?: string) {
+    const departments = await tx.department.findMany({
+      where: { workspaceId, ...(exceptId ? { id: { not: exceptId } } : {}) },
+      select: { name: true },
+    });
+    if (departments.some((d) => d.name.toLowerCase() === name.toLowerCase()))
+      throw new ConflictException('Департамент с таким названием уже существует.');
+  }
+
+  async invite(userId: string, workspaceId: string, departmentId: string, dto: InvitationDto) {
+    return this.transaction(workspaceId, async (tx) => {
+      const access = await this.access(tx, userId, workspaceId, departmentId);
+      if (!access.workspace.isActive) throw new BadRequestException('Компания сейчас недоступна.');
+      if (dto.role === DepartmentRole.CHIEF && !access.canAssignChief)
+        throw new ForbiddenException('Администратор не может назначать начальника.');
+      const member = await tx.departmentMember.findFirst({ where: { departmentId, user: { email: dto.email } } });
+      if (member) throw new ConflictException('Этот пользователь уже в департаменте. Измените его роль в списке.');
+      const pending = { departmentId, acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } };
+      if (!access.canAssignChief && await tx.teamInvitation.findFirst({
+        where: { ...pending, role: DepartmentRole.CHIEF, email: dto.email },
+      })) throw new ForbiddenException('Администратор не может перевыпускать приглашение начальнику.');
+      if (dto.role === DepartmentRole.CHIEF && await tx.teamInvitation.findFirst({
+        where: { ...pending, role: DepartmentRole.CHIEF, email: { not: dto.email } },
+      })) throw new ConflictException('Приглашение начальнику уже создано. Сначала отмените его.');
+      // Reissuing a link invalidates the previous one for this email and department.
+      await tx.teamInvitation.updateMany({
+        where: { ...pending, email: dto.email }, data: { revokedAt: new Date() },
+      });
+      const token = randomBytes(32).toString('base64url');
+      const invitation = await tx.teamInvitation.create({
+        data: {
+          email: dto.email, name: dto.name || null, role: dto.role, departmentId,
+          invitedById: userId, tokenHash: this.tokenHash(token),
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        },
+        select: invitationSelect,
+      });
+      return { invitation, token };
+    });
+  }
+
+  async revoke(userId: string, workspaceId: string, id: string) {
+    return this.transaction(workspaceId, async (tx) => {
+      const invitation = await tx.teamInvitation.findFirst({ where: { id, department: { workspaceId } } });
+      if (!invitation) throw new NotFoundException('Приглашение не найдено.');
+      const access = await this.access(tx, userId, workspaceId, invitation.departmentId);
+      if (invitation.role === DepartmentRole.CHIEF && !access.canAssignChief)
+        throw new ForbiddenException('Только начальник может отменить это приглашение.');
+      if (invitation.acceptedAt) throw new ConflictException('Приглашение уже принято. Обновите список команды.');
+      await tx.teamInvitation.update({ where: { id }, data: { revokedAt: new Date() } });
+      return { success: true };
+    });
+  }
+
+  async setRole(userId: string, workspaceId: string, departmentId: string, targetId: string, role: DepartmentRole) {
+    return this.transaction(workspaceId, async (tx) => {
+      const access = await this.access(tx, userId, workspaceId, departmentId);
+      const member = await tx.departmentMember.findUnique({
+        where: { departmentId_userId: { departmentId, userId: targetId } },
+      });
+      if (!member) throw new NotFoundException('Участник не найден.');
+      if ((role === DepartmentRole.CHIEF || member.role === DepartmentRole.CHIEF) && !access.canAssignChief)
+        throw new ForbiddenException('Администратор не может менять начальника.');
+      if (member.role === DepartmentRole.CHIEF && role !== DepartmentRole.CHIEF)
+        throw new ConflictException('Сначала назначьте другого начальника.');
+      if (role === DepartmentRole.CHIEF) await this.demoteChief(tx, departmentId, targetId);
+      await tx.departmentMember.update({ where: { id: member.id }, data: { role } });
+      return { success: true };
+    });
+  }
+
+  private async demoteChief(tx: Prisma.TransactionClient, departmentId: string, exceptUserId: string) {
+    await tx.departmentMember.updateMany({
+      where: { departmentId, role: DepartmentRole.CHIEF, userId: { not: exceptUserId } },
+      data: { role: DepartmentRole.ADMIN },
+    });
+  }
+
+  async removeMember(userId: string, workspaceId: string, departmentId: string, targetId: string) {
+    return this.transaction(workspaceId, async (tx) => {
+      const { workspace } = await this.access(tx, userId, workspaceId, departmentId);
+      const member = await tx.departmentMember.findUnique({
+        where: { departmentId_userId: { departmentId, userId: targetId } },
+      });
+      if (!member) throw new NotFoundException('Участник не найден.');
+      if (member.role === DepartmentRole.CHIEF) throw new ConflictException('Сначала назначьте другого начальника.');
+      await tx.departmentMember.delete({ where: { id: member.id } });
+      if (workspace.ownerId !== targetId && !await tx.departmentMember.count({
+        where: { userId: targetId, department: { workspaceId } },
+      })) await tx.workspaceMember.deleteMany({ where: { workspaceId, userId: targetId } });
+      return { success: true };
+    });
+  }
+
+  async setDepartments(userId: string, workspaceId: string, targetId: string, departmentIds: string[]) {
+    return this.transaction(workspaceId, async (tx) => {
+      const workspace = await this.workspace(tx, userId, workspaceId);
+      const managed = await tx.department.findMany({
+        where: { workspaceId, ...(workspace.ownerId === userId ? {} : {
+          members: { some: { userId, role: { in: [DepartmentRole.CHIEF, DepartmentRole.ADMIN] } } },
+        }) },
+        select: { id: true },
+      });
+      const managedIds = new Set(managed.map((d) => d.id));
+      const memberships = await tx.departmentMember.findMany({ where: { userId: targetId, department: { workspaceId } } });
+      if (!memberships.some((m) => managedIds.has(m.departmentId)))
+        throw new ForbiddenException('Нет доступа к этому участнику.');
+      const current = new Set(memberships.map((m) => m.departmentId));
+      if (departmentIds.some((id) => !managedIds.has(id) && !current.has(id)))
+        throw new ForbiddenException('Нет доступа к выбранному департаменту.');
+      const removed = memberships.filter((m) => managedIds.has(m.departmentId) && !departmentIds.includes(m.departmentId));
+      if (removed.some((m) => m.role === DepartmentRole.CHIEF))
+        throw new ConflictException('Перед удалением начальника назначьте ему замену.');
+      // Memberships outside the acting manager's departments are left intact.
+      await tx.departmentMember.deleteMany({ where: { id: { in: removed.map((m) => m.id) } } });
+      await tx.departmentMember.createMany({
+        data: departmentIds.filter((id) => !current.has(id)).map((departmentId) => ({
+          departmentId, userId: targetId, role: DepartmentRole.WORKER,
+        })),
+      });
+      return { success: true };
+    });
+  }
+
+  private tokenHash(token: string) {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
+  private async activeInvitation(db: Prisma.TransactionClient, token: string) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new NotFoundException('Приглашение не найдено.');
+    const invitation = await db.teamInvitation.findUnique({
+      where: { tokenHash: this.tokenHash(token) },
+      include: {
+        department: { include: { workspace: true } },
+        invitedBy: { select: { name: true, email: true } },
+      },
+    });
+    if (!invitation) throw new NotFoundException('Приглашение не найдено.');
+    if (invitation.acceptedAt || invitation.revokedAt || invitation.expiresAt <= new Date())
+      throw new GoneException('Приглашение использовано, отменено или срок ссылки истёк. Попросите новую ссылку.');
+    const { workspace } = invitation.department;
+    if (!workspace.isActive || !workspace.diagnosticsComplete) throw new GoneException('Компания сейчас недоступна.');
+    try {
+      const access = await this.access(db, invitation.invitedById, workspace.id, invitation.departmentId);
+      if (invitation.role === DepartmentRole.CHIEF && !access.canAssignChief) throw new ForbiddenException();
+    } catch (error) {
+      if (error instanceof ForbiddenException || error instanceof NotFoundException)
+        throw new GoneException('Приглашение больше не действует. Попросите новую ссылку.');
+      throw error;
+    }
+    return invitation;
+  }
+
+  async getInvitation(token: string) {
+    const invitation = await this.activeInvitation(this.prisma, token);
+    const existing = await this.prisma.user.findUnique({ where: { email: invitation.email }, select: { id: true } });
+    const workspace = invitation.department.workspace;
+    return {
+      email: invitation.email, name: invitation.name, role: invitation.role,
+      company: workspace.company, department: invitation.department.name,
+      invitedBy: invitation.invitedBy.name || (workspace.ownerId === invitation.invitedById ? workspace.ownerName : null) || invitation.invitedBy.email,
+      expiresAt: invitation.expiresAt, existingAccount: Boolean(existing),
+    };
+  }
+
+  async accept(token: string, password: string) {
+    const initial = await this.activeInvitation(this.prisma, token);
+    const existing = await this.prisma.user.findUnique({ where: { email: initial.email } });
+    const attemptKey = 'team:password:' + this.tokenHash(initial.email);
+    if (existing && await this.redis.countAttempt(attemptKey, 900) > 5)
+      throw new HttpException('Слишком много попыток. Повторите через 15 минут.', 429);
+    // An invitation never resets the password of an existing account.
+    if (existing && !await this.auth.comparePassword(password, existing.passwordHash))
+      throw new BadRequestException('Введите действующий пароль этого аккаунта.');
+    const passwordHash = existing ? null : await this.auth.hashPassword(password);
+    const workspaceId = initial.department.workspaceId;
+    const user = await this.transaction(workspaceId, async (tx) => {
+      await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', 'invite-email:' + initial.email);
+      const invitation = await this.activeInvitation(tx, token);
+      const current = await tx.user.findUnique({ where: { email: invitation.email } });
+      if (current?.id !== existing?.id || current?.passwordHash !== existing?.passwordHash)
+        throw new ConflictException('Аккаунт изменился. Обновите страницу и введите действующий пароль.');
+      const member = current ?? await tx.user.create({
+        data: { email: invitation.email, name: invitation.name, passwordHash: passwordHash! },
+      });
+      if (await tx.departmentMember.findUnique({
+        where: { departmentId_userId: { departmentId: invitation.departmentId, userId: member.id } },
+      })) throw new ConflictException('Вы уже состоите в этом департаменте.');
+      const claimed = await tx.teamInvitation.updateMany({
+        where: { id: invitation.id, acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } },
+        data: { acceptedAt: new Date() },
+      });
+      if (!claimed.count) throw new GoneException('Приглашение больше не действует.');
+      await tx.workspaceMember.upsert({
+        where: { userId_workspaceId: { userId: member.id, workspaceId } },
+        create: { userId: member.id, workspaceId, role: WorkspaceRole.TEAM_MEMBER }, update: {},
+      });
+      if (invitation.role === DepartmentRole.CHIEF) await this.demoteChief(tx, invitation.departmentId, member.id);
+      await tx.departmentMember.create({
+        data: { userId: member.id, departmentId: invitation.departmentId, role: invitation.role },
+      });
+      return member;
+    });
+    await this.redis.delete(attemptKey);
+    return { ...await this.auth.buildAuthRdo(user), workspaceId, departmentId: initial.departmentId };
+  }
+}

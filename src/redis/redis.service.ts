@@ -87,4 +87,11 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
     return result === "OK";
   }
+
+  async countAttempt(key: string, ttlSeconds: number): Promise<number> {
+    return Number(await this.client.eval(
+      "local n = redis.call('INCR', KEYS[1]); if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end; return n",
+      1, key, ttlSeconds,
+    ));
+  }
 }
