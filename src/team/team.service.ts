@@ -2,11 +2,13 @@ import {
   BadRequestException, ConflictException, ForbiddenException, GoneException,
   HttpException, Injectable, NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { createHash, randomBytes } from 'node:crypto';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import type { Prisma } from '../../generated/prisma/client.js';
 import { DepartmentRole, WorkspaceRole } from '../../generated/prisma/enums.js';
 import { AuthService } from '../auth/auth.service.js';
+import { MailService } from '../mail/mail.service.js';
 import { RedisService } from '../redis/redis.service.js';
 import type { DepartmentDto, InvitationDto } from './dto/team.dto.js';
 
@@ -21,6 +23,8 @@ export class TeamService {
     private readonly prisma: PrismaService,
     private readonly auth: AuthService,
     private readonly redis: RedisService,
+    private readonly mail: MailService,
+    private readonly config: ConfigService,
   ) {}
 
   private async workspace(db: Prisma.TransactionClient, userId: string, id: string) {
@@ -45,7 +49,6 @@ export class TeamService {
     return { workspace, department, canAssignChief: isOwner || role === DepartmentRole.CHIEF };
   }
 
-  // Serialize membership changes and invite acceptance in the same workspace.
   private transaction<T>(workspaceId: string, action: (tx: Prisma.TransactionClient) => Promise<T>) {
     return this.prisma.$transaction(async (tx) => {
       await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', 'team:' + workspaceId);
@@ -147,7 +150,6 @@ export class TeamService {
       if (dto.role === DepartmentRole.CHIEF && await tx.teamInvitation.findFirst({
         where: { ...pending, role: DepartmentRole.CHIEF, email: { not: dto.email } },
       })) throw new ConflictException('Приглашение начальнику уже создано. Сначала отмените его.');
-      // Reissuing a link invalidates the previous one for this email and department.
       await tx.teamInvitation.updateMany({
         where: { ...pending, email: dto.email }, data: { revokedAt: new Date() },
       });
@@ -160,6 +162,27 @@ export class TeamService {
         },
         select: invitationSelect,
       });
+      
+      const domain = this.config.get<string>('APP_URL', 'https://mycoo.io');
+      const link = `${domain}/invite/${token}`;
+      const inviter = await tx.user.findUnique({ where: { id: userId }, select: { name: true, email: true } });
+      const inviterName = inviter?.name || (access.workspace.ownerId === userId ? access.workspace.ownerName : null) || inviter?.email || '';
+      
+      const roleNames = {
+        [DepartmentRole.CHIEF]: 'Начальник',
+        [DepartmentRole.ADMIN]: 'Администратор',
+        [DepartmentRole.WORKER]: 'Сотрудник',
+      };
+      
+      await this.mail.sendInvitation(
+        dto.email,
+        link,
+        access.workspace.company!,
+        access.department.name,
+        roleNames[dto.role] || 'Сотрудник',
+        inviterName,
+      );
+
       return { invitation, token };
     });
   }
@@ -236,7 +259,6 @@ export class TeamService {
       const removed = memberships.filter((m) => managedIds.has(m.departmentId) && !departmentIds.includes(m.departmentId));
       if (removed.some((m) => m.role === DepartmentRole.CHIEF))
         throw new ConflictException('Перед удалением начальника назначьте ему замену.');
-      // Memberships outside the acting manager's departments are left intact.
       await tx.departmentMember.deleteMany({ where: { id: { in: removed.map((m) => m.id) } } });
       await tx.departmentMember.createMany({
         data: departmentIds.filter((id) => !current.has(id)).map((departmentId) => ({
@@ -294,9 +316,6 @@ export class TeamService {
     const attemptKey = 'team:password:' + this.tokenHash(initial.email);
     if (existing && await this.redis.countAttempt(attemptKey, 900) > 5)
       throw new HttpException('Слишком много попыток. Повторите через 15 минут.', 429);
-    // An invitation never resets the password of an existing account.
-    if (existing && !await this.auth.comparePassword(password, existing.passwordHash))
-      throw new BadRequestException('Введите действующий пароль этого аккаунта.');
     const passwordHash = existing ? null : await this.auth.hashPassword(password);
     const workspaceId = initial.department.workspaceId;
     const user = await this.transaction(workspaceId, async (tx) => {
