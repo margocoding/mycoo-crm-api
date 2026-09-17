@@ -203,7 +203,7 @@ export class WorkspaceService {
       where: { OR: [{ ownerId: userId }, { members: { some: { userId } } }] },
       orderBy: { createdAt: 'desc' },
     });
-    return workspaces.map((w) => fillDto(WorkspaceRdo, w));
+    return workspaces.map((w) => this.workspaceForUser(w, userId));
   }
 
   async getWorkspace(
@@ -222,11 +222,33 @@ export class WorkspaceService {
       },
     });
     if (!workspace) throw new NotFoundException('Workspace не найден.');
-    return fillDto(WorkspaceRdo, workspace);
+    return this.workspaceForUser(workspace, userId);
+  }
+
+  private workspaceForUser(workspace: Workspace, userId: string): WorkspaceRdo {
+    if (workspace.ownerId === userId) return fillDto(WorkspaceRdo, workspace);
+    // Team members need launch metadata, not the owner's onboarding answers or diagnostics.
+    return fillDto(WorkspaceRdo, {
+      id: workspace.id,
+      ownerId: workspace.ownerId,
+      company: workspace.company,
+      onboardingStep: workspace.onboardingStep,
+      onboardingComplete: workspace.onboardingComplete,
+      diagnosticsComplete: workspace.diagnosticsComplete,
+      isActive: workspace.isActive,
+      createdAt: workspace.createdAt,
+      updatedAt: workspace.updatedAt,
+      trialStartedAt: workspace.trialStartedAt,
+    });
   }
 
   async getWorkspaceStatus(userId: string) {
-    const workspace = await this.prisma.workspace.findFirst({
+    const membership = await this.prisma.workspaceMember.findFirst({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      include: { workspace: true },
+    });
+    const workspace = membership?.workspace ?? await this.prisma.workspace.findFirst({
       where: { ownerId: userId },
       orderBy: { createdAt: 'desc' },
     });
