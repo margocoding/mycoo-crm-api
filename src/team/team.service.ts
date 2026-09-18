@@ -316,6 +316,8 @@ export class TeamService {
     const attemptKey = 'team:password:' + this.tokenHash(initial.email);
     if (existing && await this.redis.countAttempt(attemptKey, 900) > 5)
       throw new HttpException('Слишком много попыток. Повторите через 15 минут.', 429);
+    if (existing && !await this.auth.comparePassword(password, existing.passwordHash))
+      throw new BadRequestException('Введите действующий пароль этого аккаунта.');
     const passwordHash = existing ? null : await this.auth.hashPassword(password);
     const workspaceId = initial.department.workspaceId;
     const user = await this.transaction(workspaceId, async (tx) => {
