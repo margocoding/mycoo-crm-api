@@ -7,6 +7,7 @@ import { AuthModule } from "./auth/auth.module.js";
 import { WorkspaceModule } from './workspace/workspace.module.js';
 import { GigachatModule } from './gigachat/gigachat.module.js';
 import { TeamModule } from './team/team.module.js';
+import { TasksModule } from './tasks/tasks.module.js';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { TeamModule } from './team/team.module.js';
     WorkspaceModule,
     GigachatModule,
     TeamModule,
+    TasksModule,
   ],
 })
 export class AppModule {}
