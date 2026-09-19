@@ -45,14 +45,14 @@ export class TeamService {
     const role = department.members[0]?.role;
     const isOwner = workspace.ownerId === userId;
     if (!isOwner && !role) throw new ForbiddenException('Нет доступа к департаменту.');
-    return { workspace, department, canManage: isOwner || role === DepartmentRole.CHIEF || role === DepartmentRole.ADMIN,
+    return { workspace, department, isOwner, canManage: isOwner || role === DepartmentRole.CHIEF || role === DepartmentRole.ADMIN,
       canAssignChief: isOwner || role === DepartmentRole.CHIEF };
   }
 
   private async access(db: Prisma.TransactionClient, userId: string, workspaceId: string, departmentId: string) {
     const access = await this.departmentAccess(db, userId, workspaceId, departmentId);
     if (!access.canManage)
-      throw new ForbiddenException('Управление командой доступно начальнику и администратору.');
+      throw new ForbiddenException('Управление командой доступно руководителю и администратору.');
     return access;
   }
 
@@ -73,7 +73,7 @@ export class TeamService {
     });
     const departments = rows.map(({ members, ...d }) => ({
       ...d,
-      myRole: members[0]?.role ?? null,
+      myRole: isOwner ? null : members[0]?.role ?? null,
       canManage: isOwner || members.some((m) => m.role !== DepartmentRole.WORKER),
       canAssignChief: isOwner || members.some((m) => m.role === DepartmentRole.CHIEF),
     }));
@@ -96,17 +96,25 @@ export class TeamService {
       }),
     ]);
     const members = new Map<string, {
-      id: string; email: string; name: string;
+      id: string; email: string; name: string; isOwner: boolean;
       departments: Array<{ id: string; name: string; role: DepartmentRole }>;
     }>();
     for (const { user, department, role } of memberships) {
       const row = members.get(user.id) ?? {
         ...user,
+        isOwner: user.id === workspace.ownerId,
         name: user.name || (user.id === workspace.ownerId ? workspace.ownerName : null) || user.email,
         departments: [],
       };
       row.departments.push({ ...department, role });
       members.set(user.id, row);
+    }
+    if (isOwner || managedIds.length) {
+      const owner = await this.prisma.user.findUniqueOrThrow({
+        where: { id: workspace.ownerId }, select: { id: true, email: true, name: true },
+      });
+      members.set(owner.id, { ...owner, name: owner.name || workspace.ownerName || owner.email,
+        isOwner: true, departments: [] });
     }
     return { workspaceId, isOwner, departments, members: [...members.values()], invitations };
   }
@@ -119,8 +127,7 @@ export class TeamService {
         throw new BadRequestException('Сначала завершите диагностику компании.');
       await this.checkName(tx, workspaceId, dto.name);
       return tx.department.create({
-        data: { workspaceId, name: dto.name, description: dto.description || null,
-          members: { create: { userId, role: DepartmentRole.CHIEF } } },
+        data: { workspaceId, name: dto.name, description: dto.description || null },
       });
     });
   }
@@ -146,17 +153,19 @@ export class TeamService {
     return this.transaction(workspaceId, async (tx) => {
       const access = await this.access(tx, userId, workspaceId, departmentId);
       if (!access.workspace.isActive) throw new BadRequestException('Компания сейчас недоступна.');
+      const owner = await tx.user.findUniqueOrThrow({ where: { id: access.workspace.ownerId }, select: { email: true } });
+      if (owner.email === dto.email) throw new ForbiddenException('Собственник уже имеет доступ ко всем департаментам. Его роль нельзя изменить.');
       if (dto.role === DepartmentRole.CHIEF && !access.canAssignChief)
-        throw new ForbiddenException('Администратор не может назначать начальника.');
+        throw new ForbiddenException('Администратор не может назначать руководителя.');
       const member = await tx.departmentMember.findFirst({ where: { departmentId, user: { email: dto.email } } });
       if (member) throw new ConflictException('Этот пользователь уже в департаменте. Измените его роль в списке.');
       const pending = { departmentId, acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } };
       if (!access.canAssignChief && await tx.teamInvitation.findFirst({
         where: { ...pending, role: DepartmentRole.CHIEF, email: dto.email },
-      })) throw new ForbiddenException('Администратор не может перевыпускать приглашение начальнику.');
+      })) throw new ForbiddenException('Администратор не может перевыпускать приглашение руководителю.');
       if (dto.role === DepartmentRole.CHIEF && await tx.teamInvitation.findFirst({
         where: { ...pending, role: DepartmentRole.CHIEF, email: { not: dto.email } },
-      })) throw new ConflictException('Приглашение начальнику уже создано. Сначала отмените его.');
+      })) throw new ConflictException('Приглашение руководителю уже создано. Сначала отмените его.');
       await tx.teamInvitation.updateMany({
         where: { ...pending, email: dto.email }, data: { revokedAt: new Date() },
       });
@@ -176,7 +185,7 @@ export class TeamService {
       const inviterName = inviter?.name || (access.workspace.ownerId === userId ? access.workspace.ownerName : null) || inviter?.email || '';
       
       const roleNames = {
-        [DepartmentRole.CHIEF]: 'Начальник',
+        [DepartmentRole.CHIEF]: 'Руководитель',
         [DepartmentRole.ADMIN]: 'Администратор',
         [DepartmentRole.WORKER]: 'Сотрудник',
       };
@@ -200,13 +209,13 @@ export class TeamService {
       if (!invitation) throw new NotFoundException('Приглашение не найдено.');
       const access = await this.access(tx, userId, workspaceId, invitation.departmentId);
       if (invitation.role === DepartmentRole.CHIEF && !access.canAssignChief)
-        throw new ForbiddenException('Только начальник может отменить это приглашение.');
+        throw new ForbiddenException('Только руководитель может отменить это приглашение.');
       if (invitation.acceptedAt) throw new ConflictException('Приглашение уже принято. Обновите список команды.');
       await tx.teamInvitation.update({ where: { id }, data: { revokedAt: new Date() } });
       if (!await tx.teamInvitation.count({ where: { departmentId: invitation.departmentId, email: invitation.email,
         acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } } })) {
         await tx.taskAssignee.deleteMany({ where: { email: invitation.email, userId: null,
-          task: { departmentId: invitation.departmentId } } });
+          departmentId: invitation.departmentId } });
       }
       return { success: true };
     });
@@ -215,14 +224,15 @@ export class TeamService {
   async setRole(userId: string, workspaceId: string, departmentId: string, targetId: string, role: DepartmentRole) {
     return this.transaction(workspaceId, async (tx) => {
       const access = await this.access(tx, userId, workspaceId, departmentId);
+      this.protectOwner(access.workspace.ownerId, targetId);
       const member = await tx.departmentMember.findUnique({
         where: { departmentId_userId: { departmentId, userId: targetId } },
       });
       if (!member) throw new NotFoundException('Участник не найден.');
       if ((role === DepartmentRole.CHIEF || member.role === DepartmentRole.CHIEF) && !access.canAssignChief)
-        throw new ForbiddenException('Администратор не может менять начальника.');
+        throw new ForbiddenException('Администратор не может менять руководителя.');
       if (member.role === DepartmentRole.CHIEF && role !== DepartmentRole.CHIEF)
-        throw new ConflictException('Сначала назначьте другого начальника.');
+        throw new ConflictException('Сначала назначьте другого руководителя.');
       if (role === DepartmentRole.CHIEF) await this.demoteChief(tx, departmentId, targetId);
       await tx.departmentMember.update({ where: { id: member.id }, data: { role } });
       return { success: true };
@@ -236,16 +246,21 @@ export class TeamService {
     });
   }
 
+  private protectOwner(ownerId: string, targetId: string) {
+    if (ownerId === targetId) throw new ForbiddenException('Роль и доступ собственника нельзя изменить.');
+  }
+
   async removeMember(userId: string, workspaceId: string, departmentId: string, targetId: string) {
     return this.transaction(workspaceId, async (tx) => {
       const { workspace } = await this.access(tx, userId, workspaceId, departmentId);
+      this.protectOwner(workspace.ownerId, targetId);
       const member = await tx.departmentMember.findUnique({
         where: { departmentId_userId: { departmentId, userId: targetId } },
       });
       if (!member) throw new NotFoundException('Участник не найден.');
-      if (member.role === DepartmentRole.CHIEF) throw new ConflictException('Сначала назначьте другого начальника.');
+      if (member.role === DepartmentRole.CHIEF) throw new ConflictException('Сначала назначьте другого руководителя.');
       await tx.departmentMember.delete({ where: { id: member.id } });
-      await tx.taskAssignee.deleteMany({ where: { userId: targetId, task: { departmentId } } });
+      await tx.taskAssignee.deleteMany({ where: { userId: targetId, departmentId } });
       if (workspace.ownerId !== targetId && !await tx.departmentMember.count({
         where: { userId: targetId, department: { workspaceId } },
       })) await tx.workspaceMember.deleteMany({ where: { workspaceId, userId: targetId } });
@@ -256,6 +271,7 @@ export class TeamService {
   async setDepartments(userId: string, workspaceId: string, targetId: string, departmentIds: string[]) {
     return this.transaction(workspaceId, async (tx) => {
       const workspace = await this.workspace(tx, userId, workspaceId);
+      this.protectOwner(workspace.ownerId, targetId);
       const managed = await tx.department.findMany({
         where: { workspaceId, ...(workspace.ownerId === userId ? {} : {
           members: { some: { userId, role: { in: [DepartmentRole.CHIEF, DepartmentRole.ADMIN] } } },
@@ -271,10 +287,10 @@ export class TeamService {
         throw new ForbiddenException('Нет доступа к выбранному департаменту.');
       const removed = memberships.filter((m) => managedIds.has(m.departmentId) && !departmentIds.includes(m.departmentId));
       if (removed.some((m) => m.role === DepartmentRole.CHIEF))
-        throw new ConflictException('Перед удалением начальника назначьте ему замену.');
+        throw new ConflictException('Перед удалением руководителя назначьте ему замену.');
       await tx.departmentMember.deleteMany({ where: { id: { in: removed.map((m) => m.id) } } });
       await tx.taskAssignee.deleteMany({ where: { userId: targetId,
-        task: { departmentId: { in: removed.map((m) => m.departmentId) } } } });
+        departmentId: { in: removed.map((m) => m.departmentId) } } });
       await tx.departmentMember.createMany({
         data: departmentIds.filter((id) => !current.has(id)).map((departmentId) => ({
           departmentId, userId: targetId, role: DepartmentRole.WORKER,
@@ -282,7 +298,7 @@ export class TeamService {
       });
       const target = await tx.user.findUniqueOrThrow({ where: { id: targetId }, select: { email: true, name: true } });
       await tx.taskAssignee.updateMany({ where: { email: target.email, userId: null,
-        task: { departmentId: { in: departmentIds.filter((id) => !current.has(id)) } } }, data: { userId: targetId, name: target.name } });
+        departmentId: { in: departmentIds.filter((id) => !current.has(id)) } }, data: { userId: targetId, name: target.name } });
       return { success: true };
     });
   }
@@ -342,6 +358,7 @@ export class TeamService {
       await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', 'invite-email:' + initial.email);
       const invitation = await this.activeInvitation(tx, token);
       const current = await tx.user.findUnique({ where: { email: invitation.email } });
+      if (current) this.protectOwner(invitation.department.workspace.ownerId, current.id);
       if (current?.id !== existing?.id || current?.passwordHash !== existing?.passwordHash)
         throw new ConflictException('Аккаунт изменился. Обновите страницу и введите действующий пароль.');
       const member = current ?? await tx.user.create({
@@ -364,7 +381,7 @@ export class TeamService {
         data: { userId: member.id, departmentId: invitation.departmentId, role: invitation.role },
       });
       await tx.taskAssignee.updateMany({
-        where: { email: invitation.email, userId: null, task: { departmentId: invitation.departmentId } },
+        where: { email: invitation.email, userId: null, departmentId: invitation.departmentId },
         data: { userId: member.id, name: member.name || invitation.name },
       });
       return member;
