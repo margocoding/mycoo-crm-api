@@ -75,6 +75,7 @@ model Workspace {
   members           WorkspaceMember[]
   diagnosticsAnswers DiagnosticsAnswer[]
   departments       Department[]
+  tasks             Task[]
 
   @@map("workspaces")
 }
@@ -145,7 +146,8 @@ model Department {
   createdAt   DateTime @default(now()) @map("created_at")
   members     DepartmentMember[]
   invitations TeamInvitation[]
-  tasks       Task[]
+  tasks       TaskDepartment[]
+  taskAssignments TaskAssignee[]
 
   @@index([workspaceId])
   @@map("departments")
@@ -185,9 +187,11 @@ model TeamInvitation {
 
 model Task {
   id              String         @id @default(cuid())
-  departmentId    String         @map("department_id")
-  department      Department     @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  workspaceId     String         @map("workspace_id")
+  workspace       Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  departments     TaskDepartment[]
   title           String
+  startDate       DateTime       @db.Date @map("start_date")
   dueDate         DateTime       @db.Date @map("due_date")
   priority        String         @default("medium")
   status          String         @default("backlog")
@@ -196,20 +200,34 @@ model Task {
   updatedAt       DateTime       @updatedAt @map("updated_at")
   assignees       TaskAssignee[]
 
-  @@index([departmentId, createdAt])
+  @@index([workspaceId, createdAt])
   @@map("tasks")
+}
+
+model TaskDepartment {
+  taskId       String     @map("task_id")
+  task         Task       @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  departmentId String     @map("department_id")
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, departmentId])
+  @@index([departmentId])
+  @@map("task_departments")
 }
 
 model TaskAssignee {
   id     String  @id @default(cuid())
   taskId String  @map("task_id")
   task   Task    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  departmentId String @map("department_id")
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
   email  String
   name   String?
   userId String? @map("user_id")
   user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
 
-  @@unique([taskId, email])
+  @@unique([taskId, departmentId, email])
+  @@index([departmentId])
   @@index([userId])
   @@index([email])
   @@map("task_assignees")

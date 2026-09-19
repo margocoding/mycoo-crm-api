@@ -1,8 +1,19 @@
-import { Transform } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsDateString, IsEmail, IsIn, IsString, Length, Matches, MaxLength } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsDateString, IsEmail, IsIn, IsString, Length, Matches, MaxLength, ValidateIf, ValidateNested } from 'class-validator';
 
 export const taskStatuses = ['backlog', 'in-progress', 'review', 'done'] as const;
 export type TaskStatus = typeof taskStatuses[number];
+
+export class TaskAssigneeDto {
+  @IsString()
+  @Length(1, 128)
+  departmentId!: string;
+
+  @Transform(({ value }: { value: unknown }) => typeof value === 'string' ? value.trim().toLowerCase() : value)
+  @IsEmail({}, { message: 'Укажите корректный email исполнителя.' })
+  @MaxLength(254)
+  email!: string;
+}
 
 export class TaskDto {
   @Transform(({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value)
@@ -10,6 +21,7 @@ export class TaskDto {
   @Length(1, 200, { message: 'Название задачи: от 1 до 200 символов.' })
   title!: string;
 
+  @ValidateIf((dto: TaskDto) => dto.assigneeEmails !== undefined)
   @Transform(({ value }: { value: unknown }) => Array.isArray(value)
     ? value.map((email: unknown) => typeof email === 'string' ? email.trim().toLowerCase() : email) : value)
   @IsArray()
@@ -18,7 +30,20 @@ export class TaskDto {
   @ArrayUnique({ message: 'Исполнители не должны повторяться.' })
   @IsEmail({}, { each: true, message: 'Укажите корректный email исполнителя.' })
   @MaxLength(254, { each: true })
-  assigneeEmails!: string[];
+  assigneeEmails?: string[];
+
+  @ValidateIf((dto: TaskDto) => dto.assignees !== undefined)
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Выберите хотя бы одного исполнителя.' })
+  @ArrayMaxSize(50, { message: 'Можно выбрать не более 50 назначений.' })
+  @ValidateNested({ each: true })
+  @Type(() => TaskAssigneeDto)
+  assignees?: TaskAssigneeDto[];
+
+  @ValidateIf((dto: TaskDto) => dto.startDate !== undefined)
+  @Matches(/^[1-9]\d{3}-\d{2}-\d{2}$/, { message: 'Укажите начало задачи в формате ГГГГ-ММ-ДД.' })
+  @IsDateString({ strict: true }, { message: 'Укажите существующую дату начала задачи.' })
+  startDate?: string;
 
   @Matches(/^[1-9]\d{3}-\d{2}-\d{2}$/, { message: 'Укажите срок задачи в формате ГГГГ-ММ-ДД.' })
   @IsDateString({ strict: true }, { message: 'Укажите существующую дату срока задачи.' })
