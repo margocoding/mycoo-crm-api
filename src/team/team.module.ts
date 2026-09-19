@@ -9,5 +9,6 @@ import { MailModule } from '../mail/mail.module.js';
   imports: [AuthModule, RedisModule, MailModule],
   controllers: [TeamController, InvitationsController],
   providers: [TeamService],
+  exports: [TeamService],
 })
 export class TeamModule {}

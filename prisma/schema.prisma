@@ -25,6 +25,7 @@ model User {
   subscriptions   Subscription[]
   departments     DepartmentMember[]
   invitations     TeamInvitation[] @relation("InvitedBy")
+  taskAssignments TaskAssignee[]
 
   @@map("users")
 }
@@ -144,6 +145,7 @@ model Department {
   createdAt   DateTime @default(now()) @map("created_at")
   members     DepartmentMember[]
   invitations TeamInvitation[]
+  tasks       Task[]
 
   @@index([workspaceId])
   @@map("departments")
@@ -179,4 +181,36 @@ model TeamInvitation {
 
   @@index([departmentId, email])
   @@map("team_invitations")
+}
+
+model Task {
+  id              String         @id @default(cuid())
+  departmentId    String         @map("department_id")
+  department      Department     @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  title           String
+  dueDate         DateTime       @db.Date @map("due_date")
+  priority        String         @default("medium")
+  status          String         @default("backlog")
+  successCriteria String         @default("") @map("success_criteria")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  assignees       TaskAssignee[]
+
+  @@index([departmentId, createdAt])
+  @@map("tasks")
+}
+
+model TaskAssignee {
+  id     String  @id @default(cuid())
+  taskId String  @map("task_id")
+  task   Task    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  email  String
+  name   String?
+  userId String? @map("user_id")
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([taskId, email])
+  @@index([userId])
+  @@index([email])
+  @@map("task_assignees")
 }
