@@ -231,7 +231,7 @@ export class TeamService {
       if (!member) throw new NotFoundException('Участник не найден.');
       if ((role === DepartmentRole.CHIEF || member.role === DepartmentRole.CHIEF) && !access.canAssignChief)
         throw new ForbiddenException('Администратор не может менять руководителя.');
-      if (member.role === DepartmentRole.CHIEF && role !== DepartmentRole.CHIEF)
+      if (member.role === DepartmentRole.CHIEF && role !== DepartmentRole.CHIEF && !access.isOwner)
         throw new ConflictException('Сначала назначьте другого руководителя.');
       if (role === DepartmentRole.CHIEF) await this.demoteChief(tx, departmentId, targetId);
       await tx.departmentMember.update({ where: { id: member.id }, data: { role } });
@@ -252,13 +252,14 @@ export class TeamService {
 
   async removeMember(userId: string, workspaceId: string, departmentId: string, targetId: string) {
     return this.transaction(workspaceId, async (tx) => {
-      const { workspace } = await this.access(tx, userId, workspaceId, departmentId);
+      const { workspace, isOwner } = await this.access(tx, userId, workspaceId, departmentId);
       this.protectOwner(workspace.ownerId, targetId);
       const member = await tx.departmentMember.findUnique({
         where: { departmentId_userId: { departmentId, userId: targetId } },
       });
       if (!member) throw new NotFoundException('Участник не найден.');
-      if (member.role === DepartmentRole.CHIEF) throw new ConflictException('Сначала назначьте другого руководителя.');
+      if (member.role === DepartmentRole.CHIEF && !isOwner)
+        throw new ConflictException('Сначала назначьте другого руководителя.');
       await tx.departmentMember.delete({ where: { id: member.id } });
       await tx.taskAssignee.deleteMany({ where: { userId: targetId, departmentId } });
       if (workspace.ownerId !== targetId && !await tx.departmentMember.count({
@@ -286,7 +287,7 @@ export class TeamService {
       if (departmentIds.some((id) => !managedIds.has(id) && !current.has(id)))
         throw new ForbiddenException('Нет доступа к выбранному департаменту.');
       const removed = memberships.filter((m) => managedIds.has(m.departmentId) && !departmentIds.includes(m.departmentId));
-      if (removed.some((m) => m.role === DepartmentRole.CHIEF))
+      if (workspace.ownerId !== userId && removed.some((m) => m.role === DepartmentRole.CHIEF))
         throw new ConflictException('Перед удалением руководителя назначьте ему замену.');
       await tx.departmentMember.deleteMany({ where: { id: { in: removed.map((m) => m.id) } } });
       await tx.taskAssignee.deleteMany({ where: { userId: targetId,
