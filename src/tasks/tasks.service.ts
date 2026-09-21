@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable, NotFoundException 
 import type { Prisma } from '../../generated/prisma/client.js';
 import { TeamService } from '../team/team.service.js';
 import type { TaskDto, TaskStatus } from './dto/task.dto.js';
+import { DashboardService } from '../dashboard/dashboard.service.js';
 
 const taskInclude = {
   assignees: { orderBy: { email: 'asc' as const } },
@@ -12,7 +13,7 @@ type Access = Awaited<ReturnType<TeamService['departmentAccess']>>;
 
 @Injectable()
 export class TasksService {
-  constructor(private readonly team: TeamService) {}
+  constructor(private readonly team: TeamService, private readonly dashboard: DashboardService) {}
 
   private canEdit(task: TaskRow, access: Access) {
     return access.canManage && (access.isOwner || task.departments.length === 1);
@@ -132,13 +133,17 @@ export class TasksService {
   }
 
   async setStatus(userId: string, workspaceId: string, departmentId: string, id: string, status: TaskStatus) {
-    return this.team.transaction(workspaceId, async (tx) => {
+    const { result, refreshKeys } = await this.team.transaction(workspaceId, async (tx) => {
       const access = await this.team.departmentAccess(tx, userId, workspaceId, departmentId);
-      await this.find(tx, access, id, userId);
+      const previous = await this.find(tx, access, id, userId);
       if (!access.canManage && status === 'done') throw new ForbiddenException('Статус «Готово» устанавливает руководитель или администратор.');
       const task = await tx.task.update({ where: { id }, data: { status }, include: taskInclude });
-      return this.present(task, userId, access);
+      const refreshKeys = status === 'done' && previous.status !== 'done'
+        ? await this.dashboard.requestRefresh(tx, workspaceId, task.departments.map(d => d.departmentId)) : [];
+      return { result: this.present(task, userId, access), refreshKeys };
     });
+    await this.dashboard.enqueue(refreshKeys);
+    return result;
   }
 
   async remove(userId: string, workspaceId: string, departmentId: string, id: string) {
