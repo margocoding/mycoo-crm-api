@@ -76,6 +76,7 @@ model Workspace {
   diagnosticsAnswers DiagnosticsAnswer[]
   departments       Department[]
   tasks             Task[]
+  dashboardSnapshots DashboardSnapshot[]
 
   @@map("workspaces")
 }
@@ -148,6 +149,8 @@ model Department {
   invitations TeamInvitation[]
   tasks       TaskDepartment[]
   taskAssignments TaskAssignee[]
+
+  dashboardSnapshots DashboardSnapshot[]
 
   @@index([workspaceId])
   @@map("departments")
@@ -231,4 +234,21 @@ model TaskAssignee {
   @@index([userId])
   @@index([email])
   @@map("task_assignees")
+}
+
+model DashboardSnapshot {
+  scopeKey       String   @id @map("scope_key")
+  workspaceId    String   @map("workspace_id")
+  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  departmentId   String?  @map("department_id")
+  department     Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  analysis       Json?
+  generatedAt    DateTime? @map("generated_at")
+  periodStart    DateTime? @db.Date @map("period_start")
+  periodEnd      DateTime? @db.Date @map("period_end")
+  processingAt   DateTime? @map("processing_at")
+  nextRefreshAt  DateTime @default(now()) @map("next_refresh_at")
+
+  @@index([nextRefreshAt])
+  @@map("dashboard_snapshots")
 }
