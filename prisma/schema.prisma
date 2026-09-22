@@ -248,6 +248,7 @@ model DashboardSnapshot {
   periodEnd      DateTime? @db.Date @map("period_end")
   processingAt   DateTime? @map("processing_at")
   nextRefreshAt  DateTime @default(now()) @map("next_refresh_at")
+  revision       Int      @default(0)
 
   @@index([nextRefreshAt])
   @@map("dashboard_snapshots")

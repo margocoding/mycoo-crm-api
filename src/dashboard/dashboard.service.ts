@@ -1,9 +1,10 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import type { DashboardSnapshot, Prisma } from '../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { TeamService } from '../team/team.service.js';
 import { GigachatService } from '../gigachat/gigachat.service.js';
 import { parseDashboardAnalysis } from '../gigachat/dashboard-analysis.js';
+import { DashboardQueue } from './dashboard.queue.js';
 
 const DAY = 86_400_000;
 const RETRY = 15 * 60_000;
@@ -18,21 +19,15 @@ export function dashboardPeriod(now = new Date()) {
 }
 
 @Injectable()
-export class DashboardService implements OnModuleInit, OnModuleDestroy {
+export class DashboardService implements OnModuleInit {
   private readonly logger = new Logger(DashboardService.name);
-  private timer?: ReturnType<typeof setInterval>;
-  private running = false;
 
   constructor(private readonly prisma: PrismaService, private readonly team: TeamService,
-    private readonly gigachat: GigachatService) {}
+    private readonly gigachat: GigachatService, private readonly queue: DashboardQueue) {}
 
-  onModuleInit() {
-    this.timer = setInterval(() => void this.runDue(), 60_000);
-    this.timer.unref();
-    void this.runDue();
+  async onModuleInit() {
+    await this.queue.start((key, revision) => this.refresh(key, revision), () => this.restoreQueue());
   }
-
-  onModuleDestroy() { if (this.timer) clearInterval(this.timer); }
 
   private leaseExpired(now = new Date()) {
     return new Date(now.getTime() - this.gigachat.totalTimeoutMs - 60_000);
@@ -70,12 +65,12 @@ export class DashboardService implements OnModuleInit, OnModuleDestroy {
     if (canAnalyze && workspace.isActive && workspace.diagnosticsComplete) {
       const scopeKey = `${workspaceId}:${departmentId || 'company'}`;
       const snapshot = await this.prisma.dashboardSnapshot.upsert({ where: { scopeKey }, update: {},
-        create: { scopeKey, workspaceId, departmentId } });
+        create: { scopeKey, workspaceId, departmentId, nextRefreshAt: now } });
       ai = this.presentSnapshot(snapshot, now);
       if (snapshot.nextRefreshAt <= now && (!snapshot.processingAt || snapshot.processingAt <= this.leaseExpired(now))) {
         ai.status = 'updating';
-        void this.refresh(scopeKey).catch(() => this.logger.warn('Dashboard refresh could not start'));
       }
+      await this.enqueue([scopeKey]);
     }
     return {
       scope: { departmentId: departmentId ?? null, name: department?.name ?? 'Вся компания', personal: !canAnalyze },
@@ -103,27 +98,54 @@ export class DashboardService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async runDue() {
-    if (this.running) return;
-    this.running = true;
-    try {
-      const now = new Date();
-      const due = await this.prisma.dashboardSnapshot.findMany({ where: {
-        nextRefreshAt: { lte: now }, workspace: { isActive: true, diagnosticsComplete: true },
-        OR: [{ processingAt: null }, { processingAt: { lte: this.leaseExpired(now) } }],
-      }, orderBy: { nextRefreshAt: 'asc' }, take: 10, select: { scopeKey: true } });
-      for (const snapshot of due) await this.refresh(snapshot.scopeKey);
-    } catch { this.logger.warn('Dashboard background update failed; will retry'); }
-    finally { this.running = false; }
+  async requestRefresh(tx: Prisma.TransactionClient, workspaceId: string, departmentIds: string[]) {
+    const keys: string[] = [];
+    for (const departmentId of [null, ...new Set(departmentIds)]) {
+      const scopeKey = `${workspaceId}:${departmentId || 'company'}`;
+      await tx.dashboardSnapshot.upsert({ where: { scopeKey },
+        create: { scopeKey, workspaceId, departmentId, revision: 1, nextRefreshAt: new Date() },
+        update: { revision: { increment: 1 }, nextRefreshAt: new Date() } });
+      keys.push(scopeKey);
+    }
+    return keys;
   }
 
-  async refresh(scopeKey: string) {
+  async enqueue(keys: string[]) {
+    try { for (const key of keys) await this.scheduleCurrent(key); }
+    catch { this.logger.warn('Dashboard request saved; queue will recover on reconnect or restart'); }
+  }
+
+  private async scheduleCurrent(scopeKey: string) {
+    const snapshot = await this.prisma.dashboardSnapshot.findFirst({ where: {
+      scopeKey, workspace: { isActive: true, diagnosticsComplete: true },
+    } });
+    if (!snapshot) return;
+    const at = Math.max(snapshot.nextRefreshAt.getTime(), snapshot.processingAt
+      ? snapshot.processingAt.getTime() + this.gigachat.totalTimeoutMs + 60_000 : 0);
+    await this.queue.schedule(scopeKey, snapshot.revision, new Date(at));
+  }
+
+  private async restoreQueue() {
+    let cursor: string | undefined;
+    for (;;) {
+      const snapshots = await this.prisma.dashboardSnapshot.findMany({
+        where: { workspace: { isActive: true, diagnosticsComplete: true } },
+        orderBy: { scopeKey: 'asc' }, take: 100,
+        ...(cursor ? { cursor: { scopeKey: cursor }, skip: 1 } : {}), select: { scopeKey: true },
+      });
+      for (const snapshot of snapshots) await this.scheduleCurrent(snapshot.scopeKey);
+      if (snapshots.length < 100) return;
+      cursor = snapshots[snapshots.length - 1].scopeKey;
+    }
+  }
+
+  async refresh(scopeKey: string, revision: number) {
     const processingAt = new Date();
     const claimed = await this.prisma.dashboardSnapshot.updateMany({ where: {
-      scopeKey, nextRefreshAt: { lte: processingAt }, workspace: { isActive: true, diagnosticsComplete: true },
+      scopeKey, revision, nextRefreshAt: { lte: processingAt }, workspace: { isActive: true, diagnosticsComplete: true },
       OR: [{ processingAt: null }, { processingAt: { lte: this.leaseExpired(processingAt) } }],
     }, data: { processingAt } });
-    if (!claimed.count) return;
+    if (!claimed.count) { await this.scheduleCurrent(scopeKey); return; }
     try {
       const snapshot = await this.prisma.dashboardSnapshot.findUniqueOrThrow({ where: { scopeKey },
         include: { workspace: true, department: true } });
@@ -134,15 +156,19 @@ export class DashboardService implements OnModuleInit, OnModuleDestroy {
         analysis.goalExplanation = !context.goal ? 'Укажите цель компании для оценки прогресса.' : 'За последние 7 дней нет задач для оценки прогресса.';
       }
       const generatedAt = new Date();
-      await this.prisma.dashboardSnapshot.updateMany({ where: { scopeKey, processingAt }, data: {
+      await this.prisma.dashboardSnapshot.updateMany({ where: { scopeKey, processingAt, revision }, data: {
         analysis: { ...analysis }, generatedAt, processingAt: null, periodStart: period.start, periodEnd: period.end,
         nextRefreshAt: new Date(generatedAt.getTime() + DAY),
       } });
     } catch {
       this.logger.warn('Dashboard analysis unavailable; keeping previous result');
-      await this.prisma.dashboardSnapshot.updateMany({ where: { scopeKey, processingAt }, data: {
+      await this.prisma.dashboardSnapshot.updateMany({ where: { scopeKey, processingAt, revision }, data: {
         processingAt: null, nextRefreshAt: new Date(Date.now() + RETRY),
       } });
+    } finally {
+      // A completion during inference invalidates that result; its newer request stays due.
+      await this.prisma.dashboardSnapshot.updateMany({ where: { scopeKey, processingAt }, data: { processingAt: null } });
+      await this.scheduleCurrent(scopeKey);
     }
   }
 
