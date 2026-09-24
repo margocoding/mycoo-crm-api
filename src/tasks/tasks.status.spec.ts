@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { TasksService } from './tasks.service.js';
 import type { TeamService } from '../team/team.service.js';
 import type { DashboardService } from '../dashboard/dashboard.service.js';
+import type { NotificationsService } from '../notifications/notifications.service.js';
 
 function fixture(status = 'review', canManage = true) {
   const task = { id: 'task', status, startDate: new Date('2026-09-21'), dueDate: new Date('2026-09-25'),
@@ -15,7 +16,7 @@ function fixture(status = 'review', canManage = true) {
   const dashboard = { requestRefresh: vi.fn(async () => { events.push('request'); return ['company', 'sales', 'support']; }),
     enqueue: vi.fn(async () => { events.push('enqueue'); }) };
   return { tx, team, dashboard, events,
-    service: new TasksService(team as unknown as TeamService, dashboard as unknown as DashboardService) };
+    service: new TasksService(team as unknown as TeamService, dashboard as unknown as DashboardService, {} as NotificationsService) };
 }
 
 describe('Completed tasks and dashboard refresh', () => {

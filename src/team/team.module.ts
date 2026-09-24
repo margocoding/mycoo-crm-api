@@ -4,9 +4,10 @@ import { RedisModule } from '../redis/redis.module.js';
 import { TeamController, InvitationsController } from './team.controller.js';
 import { TeamService } from './team.service.js';
 import { MailModule } from '../mail/mail.module.js';
+import { NotificationsModule } from '../notifications/notifications.module.js';
 
 @Module({
-  imports: [AuthModule, RedisModule, MailModule],
+  imports: [AuthModule, RedisModule, MailModule, NotificationsModule],
   controllers: [TeamController, InvitationsController],
   providers: [TeamService],
   exports: [TeamService],
