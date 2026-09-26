@@ -3,6 +3,8 @@ import type { Prisma } from '../../generated/prisma/client.js';
 import { TeamService } from '../team/team.service.js';
 import type { TaskDto, TaskStatus } from './dto/task.dto.js';
 import { DashboardService } from '../dashboard/dashboard.service.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
+import { canEditAssignedTask } from './task-permissions.js';
 
 const taskInclude = {
   assignees: { orderBy: { email: 'asc' as const } },
@@ -13,10 +15,15 @@ type Access = Awaited<ReturnType<TeamService['departmentAccess']>>;
 
 @Injectable()
 export class TasksService {
-  constructor(private readonly team: TeamService, private readonly dashboard: DashboardService) {}
+  constructor(private readonly team: TeamService, private readonly dashboard: DashboardService,
+    private readonly notifications: NotificationsService) {}
 
   private canEdit(task: TaskRow, access: Access) {
-    return access.canManage && (access.isOwner || task.departments.length === 1);
+    return canEditAssignedTask(access.isOwner, access.role, task.assignedByRole, task.departments.length);
+  }
+
+  private assigningRole(access: Access) {
+    return access.isOwner ? 'OWNER' as const : access.role === 'CHIEF' ? 'CHIEF' as const : 'ADMIN' as const;
   }
 
   private present(task: TaskRow, userId: string, access: Access) {
@@ -25,6 +32,8 @@ export class TasksService {
       ...task, departmentId,
       startDate: task.startDate.toISOString().slice(0, 10), dueDate: task.dueDate.toISOString().slice(0, 10),
       isShared: task.departments.length > 1, canManage: this.canEdit(task, access), canComplete: access.canManage,
+      editRestriction: access.canManage && !this.canEdit(task, access)
+        ? task.departments.length > 1 ? 'Общую задачу изменяет собственник.' : 'Задача назначена вышестоящим: редактирование и удаление недоступны.' : null,
       departments: task.departments.filter((d) => access.isOwner || d.departmentId === departmentId).map((d) => d.department),
       assignees: task.assignees.filter((a) => access.isOwner ||
         (a.departmentId === departmentId && (access.canManage || a.userId === userId)))
@@ -96,9 +105,11 @@ export class TasksService {
       this.manager(access.canManage);
       const { departmentIds, assignees, details } = await this.taskData(tx, access, dto);
       const task = await tx.task.create({
-        data: { ...details, workspaceId, departments: { create: departmentIds.map((departmentId) => ({ departmentId })) },
+        data: { ...details, workspaceId, assignedById: userId, assignedByRole: this.assigningRole(access),
+          departments: { create: departmentIds.map((departmentId) => ({ departmentId })) },
           assignees: { create: assignees } }, include: taskInclude,
       });
+      await this.notifications.assigned(tx, task);
       return this.present(task, userId, access);
     });
   }
@@ -114,7 +125,9 @@ export class TasksService {
 
   private requireEdit(task: TaskRow, access: Access) {
     this.manager(access.canManage);
-    if (!this.canEdit(task, access)) throw new ForbiddenException('Общую задачу нескольких департаментов изменяет только собственник.');
+    if (!this.canEdit(task, access)) throw new ForbiddenException(task.departments.length > 1
+      ? 'Общую задачу нескольких департаментов изменяет только собственник.'
+      : 'Нельзя редактировать или удалять задачу, назначенную вышестоящим.');
   }
 
   async update(userId: string, workspaceId: string, departmentId: string, id: string, dto: TaskDto) {
@@ -123,11 +136,15 @@ export class TasksService {
       const current = await this.find(tx, access, id, userId);
       this.requireEdit(current, access);
       const { departmentIds, assignees, details } = await this.taskData(tx, access, dto, current);
+      const previousAssignments = new Set(current.assignees.map(a => a.departmentId + ':' + a.email));
+      const reassigned = previousAssignments.size !== assignees.length || assignees.some(a => !previousAssignments.has(a.departmentId + ':' + a.email));
       const task = await tx.task.update({
         where: { id }, data: { ...details,
+          ...(reassigned ? { assignedById: userId, assignedByRole: this.assigningRole(access) } : {}),
           departments: { deleteMany: {}, create: departmentIds.map((departmentId) => ({ departmentId })) },
           assignees: { deleteMany: {}, create: assignees } }, include: taskInclude,
       });
+      await this.notifications.assigned(tx, task, current.assignees);
       return this.present(task, userId, access);
     });
   }

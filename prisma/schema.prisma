@@ -26,6 +26,8 @@ model User {
   departments     DepartmentMember[]
   invitations     TeamInvitation[] @relation("InvitedBy")
   taskAssignments TaskAssignee[]
+  assignedTasks   Task[] @relation("TaskAssigner")
+  notifications   Notification[]
 
   @@map("users")
 }
@@ -77,6 +79,7 @@ model Workspace {
   departments       Department[]
   tasks             Task[]
   dashboardSnapshots DashboardSnapshot[]
+  notifications     Notification[]
 
   @@map("workspaces")
 }
@@ -202,9 +205,53 @@ model Task {
   createdAt       DateTime       @default(now()) @map("created_at")
   updatedAt       DateTime       @updatedAt @map("updated_at")
   assignees       TaskAssignee[]
+  assignedById    String? @map("assigned_by_id")
+  assignedBy      User? @relation("TaskAssigner", fields: [assignedById], references: [id], onDelete: SetNull)
+  assignedByRole  TaskAssigningRole? @map("assigned_by_role")
+  notifications   Notification[]
 
   @@index([workspaceId, createdAt])
   @@map("tasks")
+}
+
+enum TaskAssigningRole {
+  OWNER
+  CHIEF
+  ADMIN
+}
+
+enum NotificationKind {
+  ROLE_CHANGED
+  TASK_ASSIGNED
+}
+
+enum NotificationEmailStatus {
+  PENDING
+  SENT
+  SKIPPED
+  FAILED
+}
+
+model Notification {
+  id          String @id @default(cuid())
+  workspaceId String @map("workspace_id")
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  recipientId String @map("recipient_id")
+  recipient   User @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  kind        NotificationKind
+  emailStatus NotificationEmailStatus @default(PENDING) @map("email_status")
+  emailSentAt DateTime? @map("email_sent_at")
+  message     String
+  taskId      String? @map("task_id")
+  task        Task? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  departmentId String? @map("department_id")
+  readAt      DateTime? @map("read_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([workspaceId, recipientId, createdAt, id])
+  @@index([workspaceId, recipientId, readAt])
+  @@index([emailStatus, id])
+  @@map("notifications")
 }
 
 model TaskDepartment {

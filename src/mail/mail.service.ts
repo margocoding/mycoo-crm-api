@@ -43,6 +43,25 @@ export class MailService {
     return fs.readFileSync(templatePath, "utf-8");
   }
 
+  get configured(): boolean { return this.transporter !== null; }
+
+  async sendNotification(email: string, id: string, kind: 'TASK_ASSIGNED' | 'ROLE_CHANGED', company: string, message: string): Promise<void> {
+    if (!this.transporter) throw new Error('SMTP is not configured');
+    const link = new URL('/dashboard/notifications', this.config.get('APP_URL', 'https://mycoo.io'));
+    if (!['https:', 'http:'].includes(link.protocol)) throw new Error('APP_URL must use HTTP or HTTPS');
+    const title = kind === 'TASK_ASSIGNED' ? 'Вам назначена задача' : 'Ваша роль изменена';
+    const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+    const result = await this.transporter.sendMail({
+      from: this.config.get('MAIL_FROM', 'MyCOO <no-reply@mycoo.io>'), to: email,
+      messageId: `<notification.${id}@mycoo.io>`, subject: `${title} — MyCOO`,
+      text: `${company}\n\n${message}\n\nОткрыть уведомления: ${link.href}`,
+      html: this.renderTemplate(this.loadTemplate('notification.html'), {
+        title, company: escape(company), message: escape(message), link: escape(link.href),
+      }),
+    });
+    if (!result.accepted?.length) throw new Error('Notification email was not accepted');
+  }
+
   private renderTemplate(template: string, variables: Record<string, string>): string {
     return template.replace(/\{\{(\w+)\}\}/g, (_, key) => variables[key] || "");
   }

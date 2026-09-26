@@ -11,6 +11,7 @@ import { AuthService } from '../auth/auth.service.js';
 import { MailService } from '../mail/mail.service.js';
 import { RedisService } from '../redis/redis.service.js';
 import type { DepartmentDto, InvitationDto } from './dto/team.dto.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
 
 const invitationSelect = {
   id: true, email: true, name: true, role: true, departmentId: true,
@@ -25,6 +26,7 @@ export class TeamService {
     private readonly redis: RedisService,
     private readonly mail: MailService,
     private readonly config: ConfigService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   private async workspace(db: Prisma.TransactionClient, userId: string, id: string) {
@@ -45,7 +47,7 @@ export class TeamService {
     const role = department.members[0]?.role;
     const isOwner = workspace.ownerId === userId;
     if (!isOwner && !role) throw new ForbiddenException('Нет доступа к департаменту.');
-    return { workspace, department, isOwner, canManage: isOwner || role === DepartmentRole.CHIEF || role === DepartmentRole.ADMIN,
+    return { workspace, department, role, isOwner, canManage: isOwner || role === DepartmentRole.CHIEF || role === DepartmentRole.ADMIN,
       canAssignChief: isOwner || role === DepartmentRole.CHIEF };
   }
 
@@ -235,15 +237,20 @@ export class TeamService {
         throw new ConflictException('Сначала назначьте другого руководителя.');
       if (role === DepartmentRole.CHIEF) await this.demoteChief(tx, departmentId, targetId);
       await tx.departmentMember.update({ where: { id: member.id }, data: { role } });
+      if (member.role !== role) await this.notifications.roleChanged(tx, departmentId, [targetId], role);
       return { success: true };
     });
   }
 
   private async demoteChief(tx: Prisma.TransactionClient, departmentId: string, exceptUserId: string) {
+    const previous = await tx.departmentMember.findMany({
+      where: { departmentId, role: DepartmentRole.CHIEF, userId: { not: exceptUserId } }, select: { userId: true },
+    });
     await tx.departmentMember.updateMany({
       where: { departmentId, role: DepartmentRole.CHIEF, userId: { not: exceptUserId } },
       data: { role: DepartmentRole.ADMIN },
     });
+    await this.notifications.roleChanged(tx, departmentId, previous.map(m => m.userId), DepartmentRole.ADMIN);
   }
 
   private protectOwner(ownerId: string, targetId: string) {
@@ -298,8 +305,7 @@ export class TeamService {
         })),
       });
       const target = await tx.user.findUniqueOrThrow({ where: { id: targetId }, select: { email: true, name: true } });
-      await tx.taskAssignee.updateMany({ where: { email: target.email, userId: null,
-        departmentId: { in: departmentIds.filter((id) => !current.has(id)) } }, data: { userId: targetId, name: target.name } });
+      await this.notifications.bindPending(tx, target.email, targetId, target.name, departmentIds.filter(id => !current.has(id)));
       return { success: true };
     });
   }
@@ -381,10 +387,7 @@ export class TeamService {
       await tx.departmentMember.create({
         data: { userId: member.id, departmentId: invitation.departmentId, role: invitation.role },
       });
-      await tx.taskAssignee.updateMany({
-        where: { email: invitation.email, userId: null, departmentId: invitation.departmentId },
-        data: { userId: member.id, name: member.name || invitation.name },
-      });
+      await this.notifications.bindPending(tx, invitation.email, member.id, member.name || invitation.name, [invitation.departmentId]);
       return member;
     });
     await this.redis.delete(attemptKey);
