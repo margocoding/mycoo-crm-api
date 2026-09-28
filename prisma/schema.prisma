@@ -28,6 +28,12 @@ model User {
   taskAssignments TaskAssignee[]
   assignedTasks   Task[] @relation("TaskAssigner")
   notifications   Notification[]
+  referralCode    String? @unique @map("referral_code")
+  trialStartedAt  DateTime? @map("trial_started_at")
+  pendingReferralDays Int @default(0) @map("pending_referral_days")
+  referrals       Referral[] @relation("Referrer")
+  referredBy      Referral? @relation("ReferredUser")
+  paymentOrders   PaymentOrder[]
 
   @@map("users")
 }
@@ -128,11 +134,67 @@ model Subscription {
   user        User     @relation(fields: [userId], references: [id])
   
   activeUntil DateTime @map("active_until")
+  kind        SubscriptionKind @default(PAID)
+  plan        SubscriptionPlan?
+  period      BillingPeriod?
   
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
+  @@index([userId, activeUntil])
   @@map("subscriptions")
+}
+
+enum SubscriptionKind {
+  TRIAL
+  PAID
+}
+
+enum SubscriptionPlan {
+  START
+  MISSION
+  ENTERPRISE
+}
+
+enum BillingPeriod {
+  MONTH
+  YEAR
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+}
+
+model Referral {
+  id String @id @default(cuid())
+  inviterId String @map("inviter_id")
+  inviter User @relation("Referrer", fields: [inviterId], references: [id])
+  referredUserId String @unique @map("referred_user_id")
+  referredUser User @relation("ReferredUser", fields: [referredUserId], references: [id])
+  bonusDays Int @default(30) @map("bonus_days")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([inviterId])
+  @@map("referrals")
+}
+
+model PaymentOrder {
+  id String @id @default(cuid())
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id])
+  plan SubscriptionPlan
+  period BillingPeriod
+  amountKopecks Int @map("amount_kopecks")
+  currency String @default("RUB")
+  status PaymentStatus @default(PENDING)
+  idempotencyKey String @map("idempotency_key")
+  providerPaymentId String? @unique @map("provider_payment_id")
+  paidAt DateTime? @map("paid_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, idempotencyKey])
+  @@map("payment_orders")
 }
 
 enum DepartmentRole {

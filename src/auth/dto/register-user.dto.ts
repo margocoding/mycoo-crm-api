@@ -3,11 +3,18 @@ import {
   IsEmail,
   IsNotEmpty,
   IsString,
+  IsOptional,
   Length,
   Matches,
 } from "class-validator";
 
 export class RegisterUserDto {
+  @ApiProperty({ required: false, description: 'Код пригласившего пользователя' })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-zA-Z0-9_-]{16,64}$/)
+  readonly referralCode?: string;
+
   @ApiProperty({
     example: "you@company.ru",
     description: "Email пользователя",

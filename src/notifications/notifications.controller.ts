@@ -3,13 +3,14 @@ import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import type { JwtPayload } from '../../common/types/auth.types.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
+import { BillingGuard } from '../billing/billing.guard.js';
 import { NotificationsService } from './notifications.service.js';
 
 type AuthRequest = Request & { user: JwtPayload };
 
 @ApiTags('notifications')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, BillingGuard)
 @Controller('workspace/:workspaceId/notifications')
 export class NotificationsController {
   constructor(private readonly notifications: NotificationsService) {}

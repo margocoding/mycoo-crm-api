@@ -1,3 +1,4 @@
+import { BillingCoreModule } from '../billing/billing-core.module.js';
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module.js';
 import { RedisModule } from '../redis/redis.module.js';
@@ -7,7 +8,7 @@ import { MailModule } from '../mail/mail.module.js';
 import { NotificationsModule } from '../notifications/notifications.module.js';
 
 @Module({
-  imports: [AuthModule, RedisModule, MailModule, NotificationsModule],
+  imports: [BillingCoreModule, AuthModule, RedisModule, MailModule, NotificationsModule],
   controllers: [TeamController, InvitationsController],
   providers: [TeamService],
   exports: [TeamService],

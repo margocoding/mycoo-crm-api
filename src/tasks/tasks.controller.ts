@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import type { JwtPayload } from '../../common/types/auth.types.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
+import { BillingGuard } from '../billing/billing.guard.js';
 import { TaskDto, TaskStatusDto } from './dto/task.dto.js';
 import { TasksService } from './tasks.service.js';
 
@@ -11,7 +12,7 @@ interface TaskParams { workspaceId: string; departmentId: string; taskId: string
 
 @ApiTags('tasks')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, BillingGuard)
 @Controller('workspace/:workspaceId/departments/:departmentId/tasks')
 export class TasksController {
   constructor(private readonly tasks: TasksService) {}

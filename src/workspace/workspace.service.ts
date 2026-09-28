@@ -20,12 +20,14 @@ import { DIAGNOSTICS_QUESTIONS } from './constants/diagnostics-question.constant
 import { fillDto } from '../../common/utils/fill-dto.util.js';
 import { GigachatService } from '../gigachat/gigachat.service.js';
 import { validateAnswers } from './diagnostics.validation.js';
+import { BillingService } from '../billing/billing.service.js';
 
 @Injectable()
 export class WorkspaceService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly gigachat: GigachatService,
+    private readonly billing: BillingService,
   ) {}
 
   async saveCompany(
@@ -136,7 +138,8 @@ export class WorkspaceService {
     if (!workspace?.onboardingComplete)
       throw new BadRequestException('Сначала завершите онбординг.');
     if (workspace.diagnosticsComplete && workspace.diagnosticsAnalysis)
-      return fillDto(WorkspaceRdo, workspace);
+      return this.workspaceForUser(workspace, userId);
+    await this.billing.assertCanDiagnose(userId);
     const answers = validateAnswers(dto.answers);
     const claimTime = new Date();
     // The lease exceeds the integration's total time budget; stale work cannot overwrite a newer run.
@@ -174,20 +177,23 @@ export class WorkspaceService {
     });
     try {
       const analysis = await this.gigachat.analyzeDiagnostics(answers);
-      const result = await this.prisma.workspace.updateMany({
-        where: { id: workspace.id, diagnosticsProcessingAt: claimTime },
-        data: {
-          diagnosticsAnalysis: analysis as unknown as Prisma.InputJsonValue,
-          diagnosticsComplete: true,
-          diagnosticsProcessingAt: null,
-          trialStartedAt: workspace.trialStartedAt ?? new Date(),
-          isActive: true,
-        },
-      });
-      if (!result.count)
-        throw new ConflictException(
-          'Запущена новая диагностика. Обновите статус.',
-        );
+      await this.prisma.$transaction(async tx => {
+        const trialStartedAt = await this.billing.startTrial(tx, userId);
+        const result = await tx.workspace.updateMany({
+          where: { id: workspace.id, diagnosticsProcessingAt: claimTime },
+          data: {
+            diagnosticsAnalysis: analysis as unknown as Prisma.InputJsonValue,
+            diagnosticsComplete: true,
+            diagnosticsProcessingAt: null,
+            trialStartedAt,
+            isActive: true,
+          },
+        });
+        if (!result.count)
+          throw new ConflictException(
+            'Запущена новая диагностика. Обновите статус.',
+          );
+        });
       return this.getWorkspace(userId, workspace.id);
     } finally {
       // Answers remain in the database even when the upstream API fails.
@@ -203,7 +209,7 @@ export class WorkspaceService {
       where: { OR: [{ ownerId: userId }, { members: { some: { userId } } }] },
       orderBy: { createdAt: 'desc' },
     });
-    return workspaces.map((w) => this.workspaceForUser(w, userId));
+    return Promise.all(workspaces.map((w) => this.workspaceForUser(w, userId)));
   }
 
   async getWorkspace(
@@ -225,8 +231,10 @@ export class WorkspaceService {
     return this.workspaceForUser(workspace, userId);
   }
 
-  private workspaceForUser(workspace: Workspace, userId: string): WorkspaceRdo {
-    if (workspace.ownerId === userId) return fillDto(WorkspaceRdo, workspace);
+  private async workspaceForUser(workspace: Workspace, userId: string): Promise<WorkspaceRdo> {
+    const subscription = await this.billing.summary(workspace.ownerId);
+    if (workspace.ownerId === userId) return fillDto(WorkspaceRdo, { ...workspace, subscription,
+      ...(!subscription.hasAccess ? { diagnosticsAnalysis: null, diagnosticsAnswers: undefined } : {}) });
     // Team members need launch metadata, not the owner's onboarding answers or diagnostics.
     return fillDto(WorkspaceRdo, {
       id: workspace.id,
@@ -239,6 +247,7 @@ export class WorkspaceService {
       createdAt: workspace.createdAt,
       updatedAt: workspace.updatedAt,
       trialStartedAt: workspace.trialStartedAt,
+      subscription,
     });
   }
 
@@ -261,7 +270,7 @@ export class WorkspaceService {
       canAccessWorkspace: Boolean(
         workspace?.onboardingComplete &&
         workspace.diagnosticsComplete &&
-        workspace.isActive,
+        workspace.isActive && (await this.billing.summary(workspace.ownerId)).hasAccess,
       ),
     };
   }
