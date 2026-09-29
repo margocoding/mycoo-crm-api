@@ -1,6 +1,6 @@
 import { Module } from "@nestjs/common";
 import { JwtModule } from "@nestjs/jwt";
-import { ConfigService } from "@nestjs/config";
+import { ConfigModule, ConfigService } from "@nestjs/config";
 import type { JwtModuleOptions } from "@nestjs/jwt";
 import { PrismaModule } from "../../prisma/prisma.module.js";
 import { MailModule } from "../mail/mail.module.js";
@@ -12,6 +12,7 @@ import { BillingCoreModule } from '../billing/billing-core.module.js';
 
 @Module({
   imports: [
+    ConfigModule,
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService): JwtModuleOptions => ({

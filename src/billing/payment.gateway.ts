@@ -7,6 +7,8 @@ export class PaymentGateway {
   readonly available: boolean = false;
 
   async checkout(_order: PaymentOrder): Promise<string> {
-    throw new ServiceUnavailableException('Оплата пока недоступна. Попробуйте позже.');
+    throw new ServiceUnavailableException(
+      'Оплата пока недоступна. Попробуйте позже.',
+    );
   }
 }
