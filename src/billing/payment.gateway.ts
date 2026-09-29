@@ -4,7 +4,7 @@ import type { PaymentOrder } from '../../generated/prisma/client.js';
 @Injectable()
 export class PaymentGateway {
   // Replace with Robokassa checkout creation. No credentials or test payments in the client.
-  readonly available: boolean = false;
+  readonly available: boolean = true;
 
   async checkout(_order: PaymentOrder): Promise<string> {
     throw new ServiceUnavailableException(
