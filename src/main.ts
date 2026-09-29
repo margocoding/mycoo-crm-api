@@ -43,6 +43,8 @@ async function bootstrap() {
     }),
   );
 
+  
+    app.setGlobalPrefix('/api')
   const swaggerConfig = new DocumentBuilder()
     .setTitle("MyCOO Auth API")
     .setDescription(
@@ -53,8 +55,6 @@ async function bootstrap() {
     .build();
 
   const document = SwaggerModule.createDocument(app, swaggerConfig);
-
-  app.setGlobalPrefix('/api')
 
   SwaggerModule.setup("swagger", app, document);
 

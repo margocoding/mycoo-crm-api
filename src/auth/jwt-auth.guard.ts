@@ -32,7 +32,8 @@ export class JwtAuthGuard implements CanActivate {
       request.user = payload;
 
       return true;
-    } catch {
+    } catch(e) {
+      console.error(e)
       throw new UnauthorizedException(
         "Недействительный или истёкший токен.",
       );
