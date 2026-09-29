@@ -27,6 +27,7 @@ import { ResendCodeDto } from "./dto/resend-code.dto.js";
 import { UserRdo } from "./rdo/user.rdo.js";
 import { User } from "../../generated/prisma/client.js";
 import { VerifyCodeDto } from "./dto/verify-code.dto.js";
+import { BillingService } from '../billing/billing.service.js';
 
 @Injectable()
 export class AuthService {
@@ -38,6 +39,7 @@ export class AuthService {
     private readonly mail: MailService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly billing: BillingService,
   ) {}
 
   private get isDevelopment(): boolean {
@@ -112,11 +114,13 @@ export class AuthService {
 
     const passwordHash = await this.hashPassword(dto.password);
 
-    const user = await this.prisma.user.create({
-      data: {
-        email,
-        passwordHash,
-      },
+    const user = await this.prisma.$transaction(async tx => {
+      const created = await tx.user.create({ data: { email, passwordHash } });
+      await this.billing.creditReferral(tx, created.id, dto.referralCode);
+      return created;
+    }).catch(error => {
+      if (error?.code === 'P2002') throw new ConflictException('Пользователь с таким email уже зарегистрирован.');
+      throw error;
     });
 
     await this.redis.delete(AUTH_REDIS_KEYS.code(email));

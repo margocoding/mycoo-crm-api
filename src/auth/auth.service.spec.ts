@@ -6,12 +6,14 @@ import { AuthService } from './auth.service.js';
 import type { PrismaService } from '../../prisma/prisma.service.js';
 import type { RedisService } from '../redis/redis.service.js';
 import type { MailService } from '../mail/mail.service.js';
+import type { BillingService } from '../billing/billing.service.js';
 import { describe, expect, it, vi, afterEach } from 'vitest';
 
 function setup() {
   const records = new Map<string, unknown>();
   const users = new Map<string, any>();
   const prisma = {
+    $transaction: vi.fn(async (callback: any) => callback(prisma)),
     user: {
       findUnique: vi.fn(
         async ({ where }: any) => users.get(where.email) ?? null,
@@ -48,6 +50,7 @@ function setup() {
     { sendConfirmationCode: vi.fn() } as unknown as MailService,
     new JwtService({ secret: 'unit-test-secret' }),
     new ConfigService({ NODE_ENV: 'development', BCRYPT_SALT_ROUNDS: 4 }),
+    { creditReferral: vi.fn() } as unknown as BillingService,
   );
   return { service, prisma, redis, records };
 }

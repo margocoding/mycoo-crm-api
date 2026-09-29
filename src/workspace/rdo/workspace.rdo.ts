@@ -1,8 +1,12 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { Expose } from "class-transformer";
 import type { DiagnosticsAnalysis } from "../../gigachat/gigachat.service.js";
+import type { BillingService } from '../../billing/billing.service.js';
 
 export class WorkspaceRdo {
+  @ApiPropertyOptional({ type: Object })
+  @Expose()
+  subscription?: Awaited<ReturnType<BillingService['summary']>>;
   @ApiProperty({ example: 1 })
   @Expose()
   onboardingStep!: number;

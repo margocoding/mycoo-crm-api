@@ -117,7 +117,7 @@ export class DashboardService implements OnModuleInit {
 
   private async scheduleCurrent(scopeKey: string) {
     const snapshot = await this.prisma.dashboardSnapshot.findFirst({ where: {
-      scopeKey, workspace: { isActive: true, diagnosticsComplete: true },
+      scopeKey, workspace: { isActive: true, diagnosticsComplete: true, owner: { subscriptions: { some: { activeUntil: { gt: new Date() } } } } },
     } });
     if (!snapshot) return;
     const at = Math.max(snapshot.nextRefreshAt.getTime(), snapshot.processingAt
@@ -129,7 +129,7 @@ export class DashboardService implements OnModuleInit {
     let cursor: string | undefined;
     for (;;) {
       const snapshots = await this.prisma.dashboardSnapshot.findMany({
-        where: { workspace: { isActive: true, diagnosticsComplete: true } },
+        where: { workspace: { isActive: true, diagnosticsComplete: true, owner: { subscriptions: { some: { activeUntil: { gt: new Date() } } } } } },
         orderBy: { scopeKey: 'asc' }, take: 100,
         ...(cursor ? { cursor: { scopeKey: cursor }, skip: 1 } : {}), select: { scopeKey: true },
       });
@@ -142,7 +142,7 @@ export class DashboardService implements OnModuleInit {
   async refresh(scopeKey: string, revision: number) {
     const processingAt = new Date();
     const claimed = await this.prisma.dashboardSnapshot.updateMany({ where: {
-      scopeKey, revision, nextRefreshAt: { lte: processingAt }, workspace: { isActive: true, diagnosticsComplete: true },
+      scopeKey, revision, nextRefreshAt: { lte: processingAt }, workspace: { isActive: true, diagnosticsComplete: true, owner: { subscriptions: { some: { activeUntil: { gt: new Date() } } } } },
       OR: [{ processingAt: null }, { processingAt: { lte: this.leaseExpired(processingAt) } }],
     }, data: { processingAt } });
     if (!claimed.count) { await this.scheduleCurrent(scopeKey); return; }

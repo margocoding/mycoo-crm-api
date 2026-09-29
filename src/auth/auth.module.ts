@@ -8,6 +8,7 @@ import { RedisModule } from "../redis/redis.module.js";
 import { AuthController } from "./auth.controller.js";
 import { AuthService } from "./auth.service.js";
 import { JwtAuthGuard } from "./jwt-auth.guard.js";
+import { BillingCoreModule } from '../billing/billing-core.module.js';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { JwtAuthGuard } from "./jwt-auth.guard.js";
     PrismaModule,
     RedisModule,
     MailModule,
+    BillingCoreModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtAuthGuard],

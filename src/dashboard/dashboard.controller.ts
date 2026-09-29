@@ -3,11 +3,12 @@ import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import type { JwtPayload } from '../../common/types/auth.types.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
+import { BillingGuard } from '../billing/billing.guard.js';
 import { DashboardService } from './dashboard.service.js';
 
 @ApiTags('dashboard')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, BillingGuard)
 @Controller('workspace/:workspaceId/dashboard')
 export class DashboardController {
   constructor(private readonly dashboard: DashboardService) {}

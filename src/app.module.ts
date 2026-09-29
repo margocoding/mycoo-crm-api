@@ -9,6 +9,7 @@ import { GigachatModule } from './gigachat/gigachat.module.js';
 import { TeamModule } from './team/team.module.js';
 import { TasksModule } from './tasks/tasks.module.js';
 import { DashboardModule } from './dashboard/dashboard.module.js';
+import { BillingModule } from './billing/billing.module.js';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { DashboardModule } from './dashboard/dashboard.module.js';
     TeamModule,
     TasksModule,
     DashboardModule,
+    BillingModule,
   ],
 })
 export class AppModule {}
