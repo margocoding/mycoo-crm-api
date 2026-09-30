@@ -227,17 +227,43 @@ export class BillingService {
       throw new NotFoundException(
         'Управлять подпиской компании может только собственник.',
       );
+
     if (!this.gateway.available)
       throw new ServiceUnavailableException(
         'Оплата пока недоступна. Попробуйте позже.',
       );
+
     const order = await this.prisma.$transaction(async (tx) => {
       await this.lock(tx, userId);
+
+      const current = await this.current(tx, userId);
+      const now = Date.now();
+
+      if (
+        current &&
+        current.kind === 'PAID' &&
+        current.activeUntil.getTime() > now &&
+        current.plan && current.period
+      ) {
+        const currentPrice = priceFor(current.plan, current.period);
+        const requestedPrice = priceFor(dto.plan, dto.period);
+
+        if (requestedPrice < currentPrice) {
+          throw new BadRequestException(
+            'Нельзя перейти на более дешёвый тариф до окончания текущей подписки.',
+          );
+        }
+      }
+
       const existing = await tx.paymentOrder.findUnique({
         where: {
-          userId_idempotencyKey: { userId, idempotencyKey: dto.idempotencyKey },
+          userId_idempotencyKey: {
+            userId,
+            idempotencyKey: dto.idempotencyKey,
+          },
         },
       });
+
       if (existing) {
         if (
           existing.plan !== dto.plan ||
@@ -245,19 +271,22 @@ export class BillingService {
           existing.status !== 'PENDING'
         )
           throw new ConflictException('Этот запрос оплаты уже использован.');
+
         return existing;
       }
+
       return tx.paymentOrder.create({
         data: {
           userId,
           plan: dto.plan,
           period: dto.period,
-          orderId: randomInt(2*20),
+          orderId: randomInt(2 ** 20),
           amountKopecks: priceFor(dto.plan, dto.period),
           idempotencyKey: dto.idempotencyKey,
         },
       });
     });
+
     return {
       orderId: order.id,
       checkoutUrl: await this.gateway.checkout(order),
@@ -297,10 +326,11 @@ export class BillingService {
         where: { id: order.userId },
       });
       const now = new Date();
-      const activeUntil = addPeriod(
-        new Date(Math.max(now.getTime(), current?.activeUntil.getTime() ?? 0)),
-        order.period,
-      );
+
+      const activeUntil = current
+        ? this.calculatePaidExtension(current, order.plan, order.period, now)
+        : addPeriod(new Date(now), order.period);
+
       activeUntil.setTime(
         activeUntil.getTime() + user.pendingReferralDays * DAY,
       );
@@ -328,5 +358,69 @@ export class BillingService {
         data: { status: 'PAID', paidAt: now, providerPaymentId },
       });
     });
+  }
+
+  private periodDays(period: BillingPeriod, from = new Date()): number {
+    const to = addPeriod(new Date(from), period);
+    return (to.getTime() - from.getTime()) / DAY;
+  }
+
+  private calculatePaidExtension(
+    current: {
+      plan: SubscriptionPlan | null;
+      period: BillingPeriod | null;
+      activeUntil: Date;
+      kind: string;
+    },
+    newPlan: SubscriptionPlan,
+    newPeriod: BillingPeriod,
+    now: Date,
+  ): Date {
+    const fullExtension = addPeriod(new Date(now), newPeriod);
+
+    if (
+      current.kind !== 'PAID' ||
+      !current.plan ||
+      !current.period ||
+      current.activeUntil.getTime() <= now.getTime()
+    ) {
+      return fullExtension;
+    }
+
+    if (current.plan === newPlan && current.period === newPeriod) {
+      return addPeriod(
+        new Date(Math.max(now.getTime(), current.activeUntil.getTime())),
+        newPeriod,
+      );
+    }
+
+    const remainingMs = current.activeUntil.getTime() - now.getTime();
+    const remainingDays = remainingMs / DAY;
+
+    if (remainingDays <= 0) {
+      return fullExtension;
+    }
+
+    const currentPrice = priceFor(current.plan, current.period);
+    const newPrice = priceFor(newPlan, newPeriod);
+
+    const currentPeriodDays = this.periodDays(current.period, new Date(now));
+    const newPeriodDays = this.periodDays(newPeriod, new Date(now));
+
+    if (
+      currentPrice <= 0 ||
+      newPrice <= 0 ||
+      currentPeriodDays <= 0 ||
+      newPeriodDays <= 0
+    ) {
+      return fullExtension;
+    }
+
+    const remainingValue = (currentPrice / currentPeriodDays) * remainingDays;
+
+    const newPricePerDay = newPrice / newPeriodDays;
+    const convertedDays = remainingValue / newPricePerDay;
+
+    return new Date(now.getTime() + Math.max(0, convertedDays) * DAY);
   }
 }
