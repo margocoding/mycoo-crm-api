@@ -23,13 +23,14 @@ import {
   TRIAL_DAYS,
 } from './billing.plans.js';
 import { PaymentGateway } from './payment.gateway.js';
+import { RobokassaGateway } from './robokassa.gateway.js';
 
 @Injectable()
 export class BillingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-    private readonly gateway: PaymentGateway,
+    private readonly gateway: RobokassaGateway,
   ) {}
 
   plans() {
