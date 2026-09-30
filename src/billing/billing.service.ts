@@ -252,7 +252,7 @@ export class BillingService {
           userId,
           plan: dto.plan,
           period: dto.period,
-          orderId: randomInt(2**48),
+          orderId: randomInt(2*20),
           amountKopecks: priceFor(dto.plan, dto.period),
           idempotencyKey: dto.idempotencyKey,
         },
