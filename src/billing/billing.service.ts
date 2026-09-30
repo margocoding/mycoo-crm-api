@@ -7,7 +7,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomInt } from 'node:crypto';
 import type {
   BillingPeriod,
   Prisma,
@@ -252,6 +252,7 @@ export class BillingService {
           userId,
           plan: dto.plan,
           period: dto.period,
+          orderId: randomInt(92233720368547758),
           amountKopecks: priceFor(dto.plan, dto.period),
           idempotencyKey: dto.idempotencyKey,
         },
