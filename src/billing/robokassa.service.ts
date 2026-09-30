@@ -282,6 +282,7 @@ export class RobokassaService {
     const order = await this.findOrder(invId);
 
     if (!order) {
+      this.logger.error(`Order ${invId} not found`);
       return this.redirectUrl(invId, 'failed');
     }
 
@@ -360,14 +361,16 @@ export class RobokassaService {
 
   private async findOrder(invId?: string): Promise<PaymentOrder | null> {
     if (!invId) {
+      console.error('No inv id')
       return null;
     }
 
     try {
       return await this.prisma.paymentOrder.findUnique({
-        where: { id: invId },
+        where: { orderId: +invId },
       });
-    } catch {
+    } catch(e) {
+      console.error(e);
       return null;
     }
   }
@@ -495,7 +498,6 @@ export class RobokassaService {
   ): string {
     const base =
       this.config.get<string>('FRONTEND_URL')?.trim() ||
-      this.config.get<string>('APP_URL')?.trim() ||
       'https://mycoo.io';
 
     let url: URL;
@@ -506,7 +508,7 @@ export class RobokassaService {
       url = new URL('https://mycoo.io');
     }
 
-    url.pathname = this.config.get<string>('BILLING_RETURN_PATH', '/billing');
+    url.pathname = this.config.get<string>('BILLING_RETURN_PATH', '/dashboard');
     url.search = '';
     url.hash = '';
 

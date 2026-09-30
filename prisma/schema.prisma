@@ -20,86 +20,85 @@ model User {
   passwordHash String   @map("password_hash")
   createdAt    DateTime @default(now()) @map("created_at")
 
-  workspaces      WorkspaceMember[]
-  ownedWorkspaces Workspace[] @relation("WorkspaceOwner")
-  subscriptions   Subscription[]
-  departments     DepartmentMember[]
-  invitations     TeamInvitation[] @relation("InvitedBy")
-  taskAssignments TaskAssignee[]
-  assignedTasks   Task[] @relation("TaskAssigner")
-  notifications   Notification[]
-  referralCode    String? @unique @map("referral_code")
-  trialStartedAt  DateTime? @map("trial_started_at")
-  pendingReferralDays Int @default(0) @map("pending_referral_days")
-  referrals       Referral[] @relation("Referrer")
-  referredBy      Referral? @relation("ReferredUser")
-  paymentOrders   PaymentOrder[]
+  workspaces          WorkspaceMember[]
+  ownedWorkspaces     Workspace[]        @relation("WorkspaceOwner")
+  subscriptions       Subscription[]
+  departments         DepartmentMember[]
+  invitations         TeamInvitation[]   @relation("InvitedBy")
+  taskAssignments     TaskAssignee[]
+  assignedTasks       Task[]             @relation("TaskAssigner")
+  notifications       Notification[]
+  referralCode        String?            @unique @map("referral_code")
+  trialStartedAt      DateTime?          @map("trial_started_at")
+  pendingReferralDays Int                @default(0) @map("pending_referral_days")
+  referrals           Referral[]         @relation("Referrer")
+  referredBy          Referral?          @relation("ReferredUser")
+  paymentOrders       PaymentOrder[]
 
   @@map("users")
 }
 
-
 model Workspace {
-  id                String   @id @default(cuid())
-  ownerId           String   @map("owner_id")
-  owner             User     @relation("WorkspaceOwner", fields: [ownerId], references: [id])
-  
+  id      String @id @default(cuid())
+  ownerId String @map("owner_id")
+  owner   User   @relation("WorkspaceOwner", fields: [ownerId], references: [id])
+
   // Онбординг - Компания
-  company           String?
-  industry          String?
-  industryOther     String?  @map("industry_other")
-  site              String?
-  employees         String?
-  managers          String?
-  revenue           String?
-  stage             String?
-  
+  company       String?
+  industry      String?
+  industryOther String? @map("industry_other")
+  site          String?
+  employees     String?
+  managers      String?
+  revenue       String?
+  stage         String?
+
   // Онбординг - Собственник
-  ownerName         String?  @map("owner_name")
-  ownerRole         String?  @map("owner_role")
-  roleOther         String?  @map("role_other")
-  ownerEmail        String?  @map("owner_email")
-  
+  ownerName  String? @map("owner_name")
+  ownerRole  String? @map("owner_role")
+  roleOther  String? @map("role_other")
+  ownerEmail String? @map("owner_email")
+
   // Онбординг - Цели
-  goal              String?
-  problem           String?
-  priority1         String?  @map("priority_1")
-  priority2         String?  @map("priority_2")
-  priority3         String?  @map("priority_3")
-  
+  goal      String?
+  problem   String?
+  priority1 String? @map("priority_1")
+  priority2 String? @map("priority_2")
+  priority3 String? @map("priority_3")
+
   // Статусы
-  onboardingComplete Boolean @default(false) @map("onboarding_complete")
-  diagnosticsComplete Boolean @default(false) @map("diagnostics_complete")
-  onboardingStep    Int @default(0) @map("onboarding_step")
-  diagnosticsAnalysis Json? @map("diagnostics_analysis")
+  onboardingComplete      Boolean   @default(false) @map("onboarding_complete")
+  diagnosticsComplete     Boolean   @default(false) @map("diagnostics_complete")
+  onboardingStep          Int       @default(0) @map("onboarding_step")
+  diagnosticsAnalysis     Json?     @map("diagnostics_analysis")
   diagnosticsProcessingAt DateTime? @map("diagnostics_processing_at")
-  isActive          Boolean  @default(false) @map("is_active")
-  
+  isActive                Boolean   @default(false) @map("is_active")
+
   // Даты
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
-  trialStartedAt    DateTime? @map("trial_started_at")
-  
-  members           WorkspaceMember[]
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  trialStartedAt DateTime? @map("trial_started_at")
+
+  members            WorkspaceMember[]
   diagnosticsAnswers DiagnosticsAnswer[]
-  departments       Department[]
-  tasks             Task[]
+  departments        Department[]
+  tasks              Task[]
   dashboardSnapshots DashboardSnapshot[]
-  notifications     Notification[]
+  notifications      Notification[]
 
   @@map("workspaces")
 }
 
 model WorkspaceMember {
-  id          String      @id @default(cuid())
-  userId      String      @map("user_id")
-  user        User        @relation(fields: [userId], references: [id])
-  workspaceId String      @map("workspace_id")
-  workspace   Workspace   @relation(fields: [workspaceId], references: [id])
+  id          String        @id @default(cuid())
+  userId      String        @map("user_id")
+  user        User          @relation(fields: [userId], references: [id])
+  workspaceId String        @map("workspace_id")
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id])
   role        WorkspaceRole @default(TEAM_MEMBER)
-  
-  createdAt   DateTime    @default(now()) @map("created_at")
-  updatedAt   DateTime    @updatedAt @map("updated_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   @@unique([userId, workspaceId])
   @@map("workspace_members")
@@ -112,34 +111,34 @@ enum WorkspaceRole {
 }
 
 model DiagnosticsAnswer {
-  id          String   @id @default(cuid())
-  workspaceId String   @map("workspace_id")
+  id          String    @id @default(cuid())
+  workspaceId String    @map("workspace_id")
   workspace   Workspace @relation(fields: [workspaceId], references: [id])
-  
-  questionId  String   @map("question_id")
-  opt         Int?
-  text        String?
-  skip        Boolean  @default(false)
-  
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  questionId String  @map("question_id")
+  opt        Int?
+  text       String?
+  skip       Boolean @default(false)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   @@unique([workspaceId, questionId])
   @@map("diagnostics_answers")
 }
 
 model Subscription {
-  id          String   @id @default(cuid())
-  userId      String   @map("user_id")
-  user        User     @relation(fields: [userId], references: [id])
-  
-  activeUntil DateTime @map("active_until")
-  kind        SubscriptionKind @default(PAID)
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id])
+
+  activeUntil DateTime          @map("active_until")
+  kind        SubscriptionKind  @default(PAID)
   plan        SubscriptionPlan?
   period      BillingPeriod?
-  
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([userId, activeUntil])
   @@map("subscriptions")
@@ -167,31 +166,32 @@ enum PaymentStatus {
 }
 
 model Referral {
-  id String @id @default(cuid())
-  inviterId String @map("inviter_id")
-  inviter User @relation("Referrer", fields: [inviterId], references: [id])
-  referredUserId String @unique @map("referred_user_id")
-  referredUser User @relation("ReferredUser", fields: [referredUserId], references: [id])
-  bonusDays Int @default(30) @map("bonus_days")
-  createdAt DateTime @default(now()) @map("created_at")
+  id             String   @id @default(cuid())
+  inviterId      String   @map("inviter_id")
+  inviter        User     @relation("Referrer", fields: [inviterId], references: [id])
+  referredUserId String   @unique @map("referred_user_id")
+  referredUser   User     @relation("ReferredUser", fields: [referredUserId], references: [id])
+  bonusDays      Int      @default(30) @map("bonus_days")
+  createdAt      DateTime @default(now()) @map("created_at")
 
   @@index([inviterId])
   @@map("referrals")
 }
 
 model PaymentOrder {
-  id String @id @default(cuid())
-  userId String @map("user_id")
-  user User @relation(fields: [userId], references: [id])
-  plan SubscriptionPlan
-  period BillingPeriod
-  amountKopecks Int @map("amount_kopecks")
-  currency String @default("RUB")
-  status PaymentStatus @default(PENDING)
-  idempotencyKey String @map("idempotency_key")
-  providerPaymentId String? @unique @map("provider_payment_id")
-  paidAt DateTime? @map("paid_at")
-  createdAt DateTime @default(now()) @map("created_at")
+  id                String           @id @default(cuid())
+  userId            String           @map("user_id")
+  user              User             @relation(fields: [userId], references: [id])
+  plan              SubscriptionPlan
+  orderId           Int              @unique @default(autoincrement())
+  period            BillingPeriod
+  amountKopecks     Int              @map("amount_kopecks")
+  currency          String           @default("RUB")
+  status            PaymentStatus    @default(PENDING)
+  idempotencyKey    String           @map("idempotency_key")
+  providerPaymentId String?          @unique @map("provider_payment_id")
+  paidAt            DateTime?        @map("paid_at")
+  createdAt         DateTime         @default(now()) @map("created_at")
 
   @@unique([userId, idempotencyKey])
   @@map("payment_orders")
@@ -204,15 +204,15 @@ enum DepartmentRole {
 }
 
 model Department {
-  id          String   @id @default(cuid())
-  workspaceId String   @map("workspace_id")
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  name        String
-  description String?
-  createdAt   DateTime @default(now()) @map("created_at")
-  members     DepartmentMember[]
-  invitations TeamInvitation[]
-  tasks       TaskDepartment[]
+  id              String             @id @default(cuid())
+  workspaceId     String             @map("workspace_id")
+  workspace       Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name            String
+  description     String?
+  createdAt       DateTime           @default(now()) @map("created_at")
+  members         DepartmentMember[]
+  invitations     TeamInvitation[]
+  tasks           TaskDepartment[]
   taskAssignments TaskAssignee[]
 
   dashboardSnapshots DashboardSnapshot[]
@@ -254,21 +254,21 @@ model TeamInvitation {
 }
 
 model Task {
-  id              String         @id @default(cuid())
-  workspaceId     String         @map("workspace_id")
-  workspace       Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  id              String             @id @default(cuid())
+  workspaceId     String             @map("workspace_id")
+  workspace       Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   departments     TaskDepartment[]
   title           String
-  startDate       DateTime       @db.Date @map("start_date")
-  dueDate         DateTime       @db.Date @map("due_date")
-  priority        String         @default("medium")
-  status          String         @default("backlog")
-  successCriteria String         @default("") @map("success_criteria")
-  createdAt       DateTime       @default(now()) @map("created_at")
-  updatedAt       DateTime       @updatedAt @map("updated_at")
+  startDate       DateTime           @map("start_date") @db.Date
+  dueDate         DateTime           @map("due_date") @db.Date
+  priority        String             @default("medium")
+  status          String             @default("backlog")
+  successCriteria String             @default("") @map("success_criteria")
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
   assignees       TaskAssignee[]
-  assignedById    String? @map("assigned_by_id")
-  assignedBy      User? @relation("TaskAssigner", fields: [assignedById], references: [id], onDelete: SetNull)
+  assignedById    String?            @map("assigned_by_id")
+  assignedBy      User?              @relation("TaskAssigner", fields: [assignedById], references: [id], onDelete: SetNull)
   assignedByRole  TaskAssigningRole? @map("assigned_by_role")
   notifications   Notification[]
 
@@ -295,20 +295,20 @@ enum NotificationEmailStatus {
 }
 
 model Notification {
-  id          String @id @default(cuid())
-  workspaceId String @map("workspace_id")
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  recipientId String @map("recipient_id")
-  recipient   User @relation(fields: [recipientId], references: [id], onDelete: Cascade)
-  kind        NotificationKind
-  emailStatus NotificationEmailStatus @default(PENDING) @map("email_status")
-  emailSentAt DateTime? @map("email_sent_at")
-  message     String
-  taskId      String? @map("task_id")
-  task        Task? @relation(fields: [taskId], references: [id], onDelete: SetNull)
-  departmentId String? @map("department_id")
-  readAt      DateTime? @map("read_at")
-  createdAt   DateTime @default(now()) @map("created_at")
+  id           String                  @id @default(cuid())
+  workspaceId  String                  @map("workspace_id")
+  workspace    Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  recipientId  String                  @map("recipient_id")
+  recipient    User                    @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  kind         NotificationKind
+  emailStatus  NotificationEmailStatus @default(PENDING) @map("email_status")
+  emailSentAt  DateTime?               @map("email_sent_at")
+  message      String
+  taskId       String?                 @map("task_id")
+  task         Task?                   @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  departmentId String?                 @map("department_id")
+  readAt       DateTime?               @map("read_at")
+  createdAt    DateTime                @default(now()) @map("created_at")
 
   @@index([workspaceId, recipientId, createdAt, id])
   @@index([workspaceId, recipientId, readAt])
@@ -328,15 +328,15 @@ model TaskDepartment {
 }
 
 model TaskAssignee {
-  id     String  @id @default(cuid())
-  taskId String  @map("task_id")
-  task   Task    @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  departmentId String @map("department_id")
-  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
-  email  String
-  name   String?
-  userId String? @map("user_id")
-  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  id           String     @id @default(cuid())
+  taskId       String     @map("task_id")
+  task         Task       @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  departmentId String     @map("department_id")
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  email        String
+  name         String?
+  userId       String?    @map("user_id")
+  user         User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@unique([taskId, departmentId, email])
   @@index([departmentId])
@@ -346,18 +346,18 @@ model TaskAssignee {
 }
 
 model DashboardSnapshot {
-  scopeKey       String   @id @map("scope_key")
-  workspaceId    String   @map("workspace_id")
-  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  departmentId   String?  @map("department_id")
-  department     Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
-  analysis       Json?
-  generatedAt    DateTime? @map("generated_at")
-  periodStart    DateTime? @db.Date @map("period_start")
-  periodEnd      DateTime? @db.Date @map("period_end")
-  processingAt   DateTime? @map("processing_at")
-  nextRefreshAt  DateTime @default(now()) @map("next_refresh_at")
-  revision       Int      @default(0)
+  scopeKey      String      @id @map("scope_key")
+  workspaceId   String      @map("workspace_id")
+  workspace     Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  departmentId  String?     @map("department_id")
+  department    Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  analysis      Json?
+  generatedAt   DateTime?   @map("generated_at")
+  periodStart   DateTime?   @map("period_start") @db.Date
+  periodEnd     DateTime?   @map("period_end") @db.Date
+  processingAt  DateTime?   @map("processing_at")
+  nextRefreshAt DateTime    @default(now()) @map("next_refresh_at")
+  revision      Int         @default(0)
 
   @@index([nextRefreshAt])
   @@map("dashboard_snapshots")

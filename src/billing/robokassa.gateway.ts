@@ -7,12 +7,12 @@ import { ConfigService } from '@nestjs/config';
 import type { Prisma } from '../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { PLANS } from './billing.plans.js';
-import { PaymentGateway } from './payment.gateway.js';
+import { createHash } from 'crypto';
 
 type PaymentOrder = Prisma.PaymentOrderGetPayload<object>;
 
 @Injectable()
-export class RobokassaGateway implements PaymentGateway {
+export class RobokassaGateway {
   private readonly logger = new Logger(RobokassaGateway.name);
 
   constructor(
@@ -23,11 +23,11 @@ export class RobokassaGateway implements PaymentGateway {
   get available(): boolean {
     return Boolean(
       this.merchantLogin &&
-        this.password1 &&
-        this.password2 &&
-        this.resultUrl &&
-        this.successUrl &&
-        this.failUrl,
+      this.password1 &&
+      this.password2 &&
+      this.resultUrl &&
+      this.successUrl &&
+      this.failUrl,
     );
   }
 
@@ -72,16 +72,12 @@ export class RobokassaGateway implements PaymentGateway {
     }
 
     const amount = this.formatAmount(order.amountKopecks);
-    const currency =
-      (order as { currency?: string }).currency ?? 'RUB';
+    const currency = (order as { currency?: string }).currency ?? 'RUB';
 
     const planName =
-      PLANS.find((plan) => plan.id === order.plan)?.name ??
-      String(order.plan);
+      PLANS.find((plan) => plan.id === order.plan)?.name ?? String(order.plan);
 
-    const periodLabel = String(order.period)
-      .toLowerCase()
-      .includes('year')
+    const periodLabel = String(order.period).toLowerCase().includes('year')
       ? 'годовая подписка'
       : 'месячная подписка';
 
@@ -90,10 +86,18 @@ export class RobokassaGateway implements PaymentGateway {
       select: { email: true },
     });
 
+    const signatureString = `${this.merchantLogin}:${amount}:${order.orderId}:${this.password1}`;
+
+    const signature = createHash('md5').update(signatureString).digest('hex');
+
+    this.logger.debug(`Robokassa signature string: ${signatureString}`);
+    this.logger.debug(`Robokassa signature: ${signature}`);
+
     const params = new URLSearchParams({
       MerchantLogin: this.merchantLogin!,
       Amount: amount,
-      InvId: order.id,
+      InvId: String(order.orderId),
+      SignatureValue: signature,
       OutSum: amount,
       Currency: currency,
       Description: `MyCOO · ${planName} · ${periodLabel}`,
@@ -102,6 +106,7 @@ export class RobokassaGateway implements PaymentGateway {
       FailURL: this.failUrl!,
       Culture: 'ru-RU',
       Encoding: 'utf-8',
+      IsTest: '1'
     });
 
     if (user?.email) {
@@ -110,9 +115,7 @@ export class RobokassaGateway implements PaymentGateway {
 
     const url = `${this.baseUrl}?${params.toString()}`;
 
-    this.logger.debug(
-      `Robokassa checkout URL created for order ${order.id}`,
-    );
+    this.logger.debug(`Robokassa checkout URL created for order ${order.id}`);
 
     return url;
   }

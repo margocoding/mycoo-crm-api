@@ -3,7 +3,6 @@ import { PrismaModule } from '../../prisma/prisma.module.js';
 import { AuthModule } from '../auth/auth.module.js';
 import { BillingController } from './billing.controller.js';
 import { BillingService } from './billing.service.js';
-import { PaymentGateway } from './payment.gateway.js';
 import { RobokassaController } from './robokassa.controller.js';
 import { RobokassaGateway } from './robokassa.gateway.js';
 import { RobokassaService } from './robokassa.service.js';
@@ -15,10 +14,6 @@ import { RobokassaService } from './robokassa.service.js';
     BillingService,
     RobokassaGateway,
     RobokassaService,
-    {
-      provide: PaymentGateway,
-      useExisting: RobokassaGateway,
-    },
   ],
   exports: [BillingService],
 })
