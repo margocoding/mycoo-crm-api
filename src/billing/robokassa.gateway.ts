@@ -90,9 +90,6 @@ export class RobokassaGateway {
 
     const signature = createHash('md5').update(signatureString).digest('hex');
 
-    this.logger.debug(`Robokassa signature string: ${signatureString}`);
-    this.logger.debug(`Robokassa signature: ${signature}`);
-
     const params = new URLSearchParams({
       MerchantLogin: this.merchantLogin!,
       Amount: amount,
