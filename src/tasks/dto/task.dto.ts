@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsDateString, IsEmail, IsIn, IsString, Length, Matches, MaxLength, ValidateIf, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsDateString, IsEmail, IsIn, IsInt, Max, Min, IsString, Length, Matches, MaxLength, ValidateIf, ValidateNested } from 'class-validator';
 
 export const taskStatuses = ['backlog', 'in-progress', 'review', 'done'] as const;
 export type TaskStatus = typeof taskStatuses[number];
@@ -16,6 +16,15 @@ export class TaskAssigneeDto {
 }
 
 export class TaskDto {
+  @ValidateIf((dto: TaskDto) => dto.repeatDays !== undefined)
+  @IsArray()
+  @ArrayMaxSize(7)
+  @ArrayUnique()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  @Max(7, { each: true })
+  repeatDays?: number[];
+
   @Transform(({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value)
   @IsString()
   @Length(1, 200, { message: 'Название задачи: от 1 до 200 символов.' })

@@ -4,7 +4,8 @@ import { TeamService } from '../team/team.service.js';
 import type { TaskDto, TaskStatus } from './dto/task.dto.js';
 import { DashboardService } from '../dashboard/dashboard.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
-import { canEditAssignedTask } from './task-permissions.js';
+import { canCompleteTask, canEditAssignedTask } from './task-permissions.js';
+import { scheduleRecurrence } from './task-recurrence.js';
 
 const taskInclude = {
   assignees: { orderBy: { email: 'asc' as const } },
@@ -31,7 +32,7 @@ export class TasksService {
     return {
       ...task, departmentId,
       startDate: task.startDate.toISOString().slice(0, 10), dueDate: task.dueDate.toISOString().slice(0, 10),
-      isShared: task.departments.length > 1, canManage: this.canEdit(task, access), canComplete: access.canManage,
+      isShared: task.departments.length > 1, canManage: this.canEdit(task, access), canComplete: canCompleteTask(access.canManage, task.createdById, userId),
       editRestriction: access.canManage && !this.canEdit(task, access)
         ? task.departments.length > 1 ? 'Общую задачу изменяет собственник.' : 'Задача назначена вышестоящим: редактирование и удаление недоступны.' : null,
       departments: task.departments.filter((d) => access.isOwner || d.departmentId === departmentId).map((d) => d.department),
@@ -47,6 +48,7 @@ export class TasksService {
 
   private async taskData(tx: Prisma.TransactionClient, access: Access, dto: TaskDto, current?: TaskRow) {
     const startDate = dto.startDate ?? current?.startDate.toISOString().slice(0, 10) ?? dto.dueDate;
+    if (current?.repeatSourceId && dto.repeatDays?.length) throw new BadRequestException('Настройте повторение в исходной задаче.');
     if (startDate > dto.dueDate) throw new BadRequestException('Дата начала не может быть позже даты окончания.');
     if (Boolean(dto.assignees) === Boolean(dto.assigneeEmails))
       throw new BadRequestException('Передайте один список исполнителей.');
@@ -81,9 +83,13 @@ export class TasksService {
       if (previous) return { email, departmentId, name: previous.name, userId: null };
       throw new BadRequestException('Исполнители должны состоять в выбранном департаменте или иметь действующее приглашение.');
     });
+    const repeatDays = dto.repeatDays ?? current?.repeatDays ?? [];
+    const scheduleChanged = !current || JSON.stringify([...repeatDays].sort()) !== JSON.stringify([...current.repeatDays].sort())
+      || startDate !== current.startDate.toISOString().slice(0, 10);
     return { departmentIds, assignees, details: {
       title: dto.title, startDate: new Date(startDate), dueDate: new Date(dto.dueDate),
       priority: dto.priority, successCriteria: dto.successCriteria,
+      repeatDays, ...(scheduleChanged ? { nextRepeatAt: scheduleRecurrence(repeatDays, startDate) } : {}),
     } };
   }
 
@@ -92,7 +98,7 @@ export class TasksService {
       const access = await this.team.departmentAccess(tx, userId, workspaceId, departmentId);
       const tasks = await tx.task.findMany({
         where: { workspaceId, departments: { some: { departmentId } },
-          ...(access.canManage ? {} : { assignees: { some: { userId, departmentId } } }) },
+          ...(access.canManage ? {} : { OR: [{ assignees: { some: { userId, departmentId } } }, { createdById: userId }] }) },
         include: taskInclude, orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
       });
       return { canManage: access.canManage, tasks: tasks.map((t) => this.present(t, userId, access)) };
@@ -105,7 +111,7 @@ export class TasksService {
       this.manager(access.canManage);
       const { departmentIds, assignees, details } = await this.taskData(tx, access, dto);
       const task = await tx.task.create({
-        data: { ...details, workspaceId, assignedById: userId, assignedByRole: this.assigningRole(access),
+        data: { ...details, workspaceId, createdById: userId, assignedById: userId, assignedByRole: this.assigningRole(access),
           departments: { create: departmentIds.map((departmentId) => ({ departmentId })) },
           assignees: { create: assignees } }, include: taskInclude,
       });
@@ -117,7 +123,7 @@ export class TasksService {
   private async find(tx: Prisma.TransactionClient, access: Access, id: string, userId: string) {
     const task = await tx.task.findFirst({
       where: { id, workspaceId: access.workspace.id, departments: { some: { departmentId: access.department.id } },
-        ...(access.canManage ? {} : { assignees: { some: { userId, departmentId: access.department.id } } }) }, include: taskInclude,
+        ...(access.canManage ? {} : { OR: [{ assignees: { some: { userId, departmentId: access.department.id } } }, { createdById: userId }] }) }, include: taskInclude,
     });
     if (!task) throw new NotFoundException('Задача не найдена.');
     return task;
@@ -153,7 +159,7 @@ export class TasksService {
     const { result, refreshKeys } = await this.team.transaction(workspaceId, async (tx) => {
       const access = await this.team.departmentAccess(tx, userId, workspaceId, departmentId);
       const previous = await this.find(tx, access, id, userId);
-      if (!access.canManage && status === 'done') throw new ForbiddenException('Статус «Готово» устанавливает руководитель или администратор.');
+      if (!canCompleteTask(access.canManage, previous.createdById, userId) && status === 'done') throw new ForbiddenException('Статус «Готово» устанавливает собственник, руководитель, администратор или создатель задачи.');
       const task = await tx.task.update({ where: { id }, data: { status }, include: taskInclude });
       const refreshKeys = status === 'done' && previous.status !== 'done'
         ? await this.dashboard.requestRefresh(tx, workspaceId, task.departments.map(d => d.departmentId)) : [];

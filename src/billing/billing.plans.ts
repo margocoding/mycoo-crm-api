@@ -4,7 +4,7 @@ import type {
 } from '../../generated/prisma/client.js';
 
 export const TRIAL_DAYS = 10;
-export const REFERRAL_DAYS = 30;
+export const REFERRAL_DISCOUNT_PERCENT = 10;
 export const DAY = 86_400_000;
 // Keep stored plan IDs stable when changing their public names and positioning.
 export const PLANS = [

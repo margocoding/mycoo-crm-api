@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { canEditAssignedTask } from './task-permissions.js';
+import { canCompleteTask, canEditAssignedTask } from './task-permissions.js';
 
 describe('Task assignment hierarchy', () => {
+  it('lets managers or the original creator complete tasks, not other employees', () => {
+    expect(canCompleteTask(true, 'creator', 'manager')).toBe(true);
+    expect(canCompleteTask(false, 'creator', 'creator')).toBe(true);
+    expect(canCompleteTask(false, 'creator', 'employee')).toBe(false);
+    expect(canCompleteTask(false, null, 'employee')).toBe(false);
+  });
   it('lets the owner manage tasks from every assigning role, including shared tasks', () => {
     for (const role of ['OWNER', 'CHIEF', 'ADMIN', null] as const)
       expect(canEditAssignedTask(true, undefined, role, 2)).toBe(true);
