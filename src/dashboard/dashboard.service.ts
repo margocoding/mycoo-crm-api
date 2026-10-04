@@ -5,6 +5,7 @@ import { TeamService } from '../team/team.service.js';
 import { GigachatService } from '../gigachat/gigachat.service.js';
 import { parseDashboardAnalysis } from '../gigachat/dashboard-analysis.js';
 import { DashboardQueue } from './dashboard.queue.js';
+import { canCompleteTask } from '../tasks/task-permissions.js';
 
 const DAY = 86_400_000;
 const RETRY = 15 * 60_000;
@@ -49,13 +50,13 @@ export class DashboardService implements OnModuleInit {
     const now = new Date();
     const { end: today } = dashboardPeriod(now);
     const where: Prisma.TaskWhereInput = { ...this.taskFilter(workspaceId, departmentId),
-      ...(canAnalyze ? {} : { assignees: { some: { userId, departmentId: departmentId! } } }) };
+      ...(canAnalyze ? {} : { OR: [{ assignees: { some: { userId, departmentId: departmentId! } } }, { createdById: userId }] }) };
     const [groups, overdue, upcoming, workspace] = await Promise.all([
       this.prisma.task.groupBy({ by: ['status'], where, _count: { _all: true } }),
       this.prisma.task.count({ where: { ...where, status: { not: 'done' }, dueDate: { lt: today } } }),
       this.prisma.task.findMany({ where: { ...where, status: { not: 'done' } }, take: 3,
         orderBy: [{ dueDate: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-        select: { id: true, title: true, startDate: true, dueDate: true, status: true,
+        select: { id: true, title: true, startDate: true, dueDate: true, status: true, createdById: true,
           departments: { where: departmentId ? { departmentId } : {}, take: 1, orderBy: { departmentId: 'asc' }, select: { departmentId: true } } } }),
       this.prisma.workspace.findUniqueOrThrow({ where: { id: workspaceId }, select: { isActive: true, diagnosticsComplete: true } }),
     ]);
@@ -77,7 +78,7 @@ export class DashboardService implements OnModuleInit {
       scopes: [...(team.isOwner ? [{ id: '', name: 'Вся компания' }] : []), ...team.departments.map(d => ({ id: d.id, name: d.name }))],
       tasks: { active: groups.filter(g => g.status !== 'done').reduce((sum, g) => sum + g._count._all, 0),
         overdue, completed: groups.find(g => g.status === 'done')?._count._all ?? 0,
-        items: upcoming.map(t => ({ id: t.id, title: t.title, status: t.status,
+        items: upcoming.map(t => ({ id: t.id, title: t.title, status: t.status, canComplete: canCompleteTask(canAnalyze, t.createdById, userId),
           startDate: t.startDate.toISOString().slice(0, 10), dueDate: t.dueDate.toISOString().slice(0, 10),
           departmentId: t.departments[0]?.departmentId ?? null })) },
       team: { employees: members.length, managers: members.filter(m => m.departments.some(d =>

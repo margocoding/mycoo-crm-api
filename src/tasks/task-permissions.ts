@@ -2,6 +2,10 @@ import type { DepartmentRole, TaskAssigningRole } from '../../generated/prisma/e
 
 const ranks = { OWNER: 3, CHIEF: 2, ADMIN: 1, WORKER: 0 };
 
+export function canCompleteTask(canManage: boolean, createdById: string | null | undefined, userId: string) {
+  return canManage || createdById === userId;
+}
+
 export function canEditAssignedTask(isOwner: boolean, role: DepartmentRole | undefined,
   assignedByRole: TaskAssigningRole | null, departmentCount: number) {
   if (isOwner) return true;

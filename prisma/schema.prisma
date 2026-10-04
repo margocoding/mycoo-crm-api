@@ -27,6 +27,7 @@ model User {
   invitations         TeamInvitation[]   @relation("InvitedBy")
   taskAssignments     TaskAssignee[]
   assignedTasks       Task[]             @relation("TaskAssigner")
+  createdTasks        Task[]             @relation("TaskCreator")
   notifications       Notification[]
   referralCode        String?            @unique @map("referral_code")
   trialStartedAt      DateTime?          @map("trial_started_at")
@@ -171,7 +172,9 @@ model Referral {
   inviter        User     @relation("Referrer", fields: [inviterId], references: [id])
   referredUserId String   @unique @map("referred_user_id")
   referredUser   User     @relation("ReferredUser", fields: [referredUserId], references: [id])
-  bonusDays      Int      @default(30) @map("bonus_days")
+  bonusDays      Int      @default(0) @map("bonus_days")
+  discountPercent Int    @default(0) @map("discount_percent")
+  discountOrder PaymentOrder? @relation("ReferralDiscount")
   createdAt      DateTime @default(now()) @map("created_at")
 
   @@index([inviterId])
@@ -186,6 +189,9 @@ model PaymentOrder {
   orderId           Int              @unique @default(autoincrement())
   period            BillingPeriod
   amountKopecks     Int              @map("amount_kopecks")
+  discountPercent  Int              @default(0) @map("discount_percent")
+  referralDiscountId String?        @unique @map("referral_discount_id")
+  referralDiscount Referral?        @relation("ReferralDiscount", fields: [referralDiscountId], references: [id])
   currency          String           @default("RUB")
   status            PaymentStatus    @default(PENDING)
   idempotencyKey    String           @map("idempotency_key")
@@ -270,9 +276,19 @@ model Task {
   assignedById    String?            @map("assigned_by_id")
   assignedBy      User?              @relation("TaskAssigner", fields: [assignedById], references: [id], onDelete: SetNull)
   assignedByRole  TaskAssigningRole? @map("assigned_by_role")
+  createdById     String?            @map("created_by_id")
+  createdBy       User?              @relation("TaskCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  repeatDays      Int[]              @default([]) @map("repeat_days")
+  nextRepeatAt    DateTime?          @map("next_repeat_at")
+  repeatSourceId  String?            @map("repeat_source_id")
+  repeatSource    Task?              @relation("TaskRepeats", fields: [repeatSourceId], references: [id], onDelete: SetNull)
+  repeatInstances Task[]             @relation("TaskRepeats")
+  repeatDate      DateTime?          @map("repeat_date") @db.Date
   notifications   Notification[]
 
   @@index([workspaceId, createdAt])
+  @@index([nextRepeatAt])
+  @@unique([repeatSourceId, repeatDate])
   @@map("tasks")
 }
 

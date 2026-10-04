@@ -19,10 +19,9 @@ import {
   DAY,
   PLANS,
   priceFor,
-  REFERRAL_DAYS,
+  REFERRAL_DISCOUNT_PERCENT,
   TRIAL_DAYS,
 } from './billing.plans.js';
-import { PaymentGateway } from './payment.gateway.js';
 import { RobokassaGateway } from './robokassa.gateway.js';
 
 @Injectable()
@@ -86,7 +85,7 @@ export class BillingService {
       where: { id: userId, referralCode: null },
       data: { referralCode: randomBytes(18).toString('hex') },
     });
-    const [user, referrals, subscription] = await Promise.all([
+    const [user, referrals, subscription, earnedDiscounts, availableDiscounts, pendingOrders, usedDiscounts] = await Promise.all([
       this.prisma.user.findUniqueOrThrow({
         where: { id: userId },
         select: { referralCode: true, pendingReferralDays: true },
@@ -97,6 +96,11 @@ export class BillingService {
         _sum: { bonusDays: true },
       }),
       this.summary(userId),
+      this.prisma.referral.count({ where: { inviterId: userId, discountPercent: { gt: 0 } } }),
+      this.prisma.referral.count({ where: { inviterId: userId, discountPercent: { gt: 0 }, discountOrder: { is: null } } }),
+      this.prisma.paymentOrder.findMany({ where: { userId, referralDiscountId: { not: null }, status: 'PENDING' },
+        select: { id: true, plan: true, period: true, amountKopecks: true, discountPercent: true }, orderBy: { createdAt: 'asc' } }),
+      this.prisma.paymentOrder.count({ where: { userId, referralDiscountId: { not: null }, status: 'PAID' } }),
     ]);
     const url = new URL(this.config.get<string>('APP_URL', 'https://mycoo.io'));
     url.pathname = '/';
@@ -110,7 +114,9 @@ export class BillingService {
         registrations: referrals._count,
         earnedDays: referrals._sum.bonusDays ?? 0,
         pendingDays: user.pendingReferralDays,
-        daysPerRegistration: REFERRAL_DAYS,
+        daysPerRegistration: 0,
+        discountPercent: REFERRAL_DISCOUNT_PERCENT,
+        earnedDiscounts, availableDiscounts, usedDiscounts, pendingOrders,
       },
     };
   }
@@ -127,28 +133,10 @@ export class BillingService {
     });
     if (!inviter || inviter.id === referredUserId) return;
     await this.lock(tx, inviter.id);
-    const inserted = await tx.referral.createMany({
-      data: { inviterId: inviter.id, referredUserId, bonusDays: REFERRAL_DAYS },
+    await tx.referral.createMany({
+      data: { inviterId: inviter.id, referredUserId, bonusDays: 0, discountPercent: REFERRAL_DISCOUNT_PERCENT },
       skipDuplicates: true,
     });
-    if (!inserted.count) return;
-    const current = await this.current(tx, inviter.id);
-    if (current) {
-      await tx.subscription.update({
-        where: { id: current.id },
-        data: {
-          activeUntil: new Date(
-            Math.max(Date.now(), current.activeUntil.getTime()) +
-              REFERRAL_DAYS * DAY,
-          ),
-        },
-      });
-    } else {
-      await tx.user.update({
-        where: { id: inviter.id },
-        data: { pendingReferralDays: { increment: REFERRAL_DAYS } },
-      });
-    }
   }
 
   async startTrial(tx: Prisma.TransactionClient, userId: string) {
@@ -190,7 +178,7 @@ export class BillingService {
         statusCode: 402,
         code: 'SUBSCRIPTION_EXPIRED',
         message:
-          'Срок подписки истёк. Выберите тариф или продлите доступ по реферальной программе.',
+          'Срок подписки истёк. Выберите тариф и оплатите продление доступа.',
       },
       402,
     );
@@ -275,13 +263,29 @@ export class BillingService {
         return existing;
       }
 
+      // Keep the original checkout usable after closing the payment page. A reward
+      // stays attached to one order because an old provider link can still be paid.
+      const pendingDiscount = await tx.paymentOrder.findFirst({
+        where: { userId, plan: dto.plan, period: dto.period, status: 'PENDING', referralDiscountId: { not: null } },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (pendingDiscount) return pendingDiscount;
+      const reward = await tx.referral.findFirst({
+        where: { inviterId: userId, discountPercent: { gt: 0 }, discountOrder: { is: null } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      });
+      const discountPercent = reward?.discountPercent ?? 0;
+      const amountKopecks = Math.round(priceFor(dto.plan, dto.period) * (100 - discountPercent) / 100);
+
       return tx.paymentOrder.create({
         data: {
           userId,
           plan: dto.plan,
           period: dto.period,
           orderId: randomInt(2 ** 20),
-          amountKopecks: priceFor(dto.plan, dto.period),
+          amountKopecks,
+          discountPercent,
+          referralDiscountId: reward?.id,
           idempotencyKey: dto.idempotencyKey,
         },
       });
