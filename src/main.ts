@@ -5,10 +5,12 @@ import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import { ValidationError } from "class-validator";
 import helmet from "helmet";
 import { AppModule } from "./app.module.js";
+import type { NestExpressApplication } from '@nestjs/platform-express';
 
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  app.useBodyParser('json', { limit: '1mb' });
   app.enableShutdownHooks();
 
   app.use(helmet());

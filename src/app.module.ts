@@ -10,6 +10,7 @@ import { TeamModule } from './team/team.module.js';
 import { TasksModule } from './tasks/tasks.module.js';
 import { DashboardModule } from './dashboard/dashboard.module.js';
 import { BillingModule } from './billing/billing.module.js';
+import { MeetingsModule } from './meetings/meetings.module.js';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { BillingModule } from './billing/billing.module.js';
     TasksModule,
     DashboardModule,
     BillingModule,
+    MeetingsModule,
   ],
 })
 export class AppModule {}

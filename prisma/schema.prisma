@@ -28,6 +28,8 @@ model User {
   taskAssignments     TaskAssignee[]
   assignedTasks       Task[]             @relation("TaskAssigner")
   createdTasks        Task[]             @relation("TaskCreator")
+  organizedMeetings   Meeting[]          @relation("MeetingOrganizer")
+  meetingParticipants MeetingParticipant[]
   notifications       Notification[]
   referralCode        String?            @unique @map("referral_code")
   trialStartedAt      DateTime?          @map("trial_started_at")
@@ -84,6 +86,7 @@ model Workspace {
   diagnosticsAnswers DiagnosticsAnswer[]
   departments        Department[]
   tasks              Task[]
+  meetings           Meeting[]
   dashboardSnapshots DashboardSnapshot[]
   notifications      Notification[]
 
@@ -219,6 +222,7 @@ model Department {
   members         DepartmentMember[]
   invitations     TeamInvitation[]
   tasks           TaskDepartment[]
+  meetings        Meeting[]
   taskAssignments TaskAssignee[]
 
   dashboardSnapshots DashboardSnapshot[]
@@ -285,6 +289,8 @@ model Task {
   repeatInstances Task[]             @relation("TaskRepeats")
   repeatDate      DateTime?          @map("repeat_date") @db.Date
   notifications   Notification[]
+  meetingId       String? @map("meeting_id")
+  meeting         Meeting? @relation(fields: [meetingId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, createdAt])
   @@index([nextRepeatAt])
@@ -301,6 +307,8 @@ enum TaskAssigningRole {
 enum NotificationKind {
   ROLE_CHANGED
   TASK_ASSIGNED
+  MEETING_INVITED
+  MEETING_PROTOCOL
 }
 
 enum NotificationEmailStatus {
@@ -322,6 +330,7 @@ model Notification {
   message      String
   taskId       String?                 @map("task_id")
   task         Task?                   @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  meetingId    String?                 @map("meeting_id")
   departmentId String?                 @map("department_id")
   readAt       DateTime?               @map("read_at")
   createdAt    DateTime                @default(now()) @map("created_at")
@@ -359,6 +368,85 @@ model TaskAssignee {
   @@index([userId])
   @@index([email])
   @@map("task_assignees")
+}
+
+model Meeting {
+  id String @id @default(cuid())
+  workspaceId String @map("workspace_id")
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  departmentId String @map("department_id")
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  organizerId String @map("organizer_id")
+  organizer User @relation("MeetingOrganizer", fields: [organizerId], references: [id])
+  roomName String @unique @map("room_name")
+  title String
+  kind String @default("operations")
+  objective String @default("")
+  agenda String @default("")
+  startsAt DateTime @map("starts_at")
+  duration Int
+  status String @default("scheduled")
+  waitingRoom Boolean @default(true) @map("waiting_room")
+  muteOnEntry Boolean @default(true) @map("mute_on_entry")
+  allowScreenShare Boolean @default(true) @map("allow_screen_share")
+  locked Boolean @default(false)
+  roomClosed Boolean @default(false) @map("room_closed")
+  startedAt DateTime? @map("started_at")
+  endedAt DateTime? @map("ended_at")
+  notes String @default("")
+  previousId String? @map("previous_id")
+  previous Meeting? @relation("MeetingFollowup", fields: [previousId], references: [id], onDelete: SetNull)
+  following Meeting[] @relation("MeetingFollowup")
+  participants MeetingParticipant[]
+  recordings MeetingRecording[]
+  tasks Task[]
+  transcript String @default("")
+  transcriptSource String @default("recording") @map("transcript_source")
+  analysisStatus String @default("none") @map("analysis_status")
+  analysisRevision Int @default(0) @map("analysis_revision")
+  analysis Json?
+  analysisError String? @map("analysis_error")
+  processingUntil DateTime? @map("processing_until")
+  publishedAt DateTime? @map("published_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@index([workspaceId, startsAt])
+  @@index([analysisStatus, processingUntil])
+  @@map("meetings")
+}
+
+model MeetingParticipant {
+  id String @id @default(cuid())
+  meetingId String @map("meeting_id")
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role String @default("participant")
+  admitted Boolean @default(false)
+  requestedAt DateTime? @map("requested_at")
+  removed Boolean @default(false)
+  raisedHand Boolean @default(false) @map("raised_hand")
+  @@unique([meetingId, userId])
+  @@map("meeting_participants")
+}
+
+model MeetingRecording {
+  id String @id @default(cuid())
+  meetingId String @map("meeting_id")
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  egressId String? @unique @map("egress_id")
+  status String @default("starting")
+  fileKey String? @map("file_key")
+  uploadId String? @map("upload_id")
+  speechTaskId String? @map("speech_task_id")
+  transcript String?
+  error String?
+  processingUntil DateTime? @map("processing_until")
+  nextAttemptAt DateTime @default(now()) @map("next_attempt_at")
+  attempts Int @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([status, nextAttemptAt])
+  @@map("meeting_recordings")
 }
 
 model DashboardSnapshot {

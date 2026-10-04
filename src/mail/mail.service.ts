@@ -45,11 +45,11 @@ export class MailService {
 
   get configured(): boolean { return this.transporter !== null; }
 
-  async sendNotification(email: string, id: string, kind: 'TASK_ASSIGNED' | 'ROLE_CHANGED', company: string, message: string): Promise<void> {
+  async sendNotification(email: string, id: string, kind: 'TASK_ASSIGNED' | 'ROLE_CHANGED' | 'MEETING_INVITED' | 'MEETING_PROTOCOL', company: string, message: string): Promise<void> {
     if (!this.transporter) throw new Error('SMTP is not configured');
     const link = new URL('/dashboard/notifications', this.config.get('APP_URL', 'https://mycoo.io'));
     if (!['https:', 'http:'].includes(link.protocol)) throw new Error('APP_URL must use HTTP or HTTPS');
-    const title = kind === 'TASK_ASSIGNED' ? 'Вам назначена задача' : 'Ваша роль изменена';
+    const title = { TASK_ASSIGNED: 'Вам назначена задача', ROLE_CHANGED: 'Ваша роль изменена', MEETING_INVITED: 'Приглашение на встречу', MEETING_PROTOCOL: 'Протокол встречи опубликован' }[kind];
     const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
     const result = await this.transporter.sendMail({
       from: this.config.get('MAIL_FROM', 'MyCOO <no-reply@mycoo.io>'), to: email,
