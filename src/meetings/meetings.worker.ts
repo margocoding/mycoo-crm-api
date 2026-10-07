@@ -227,7 +227,7 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
           taskId: row.speechTaskId,
         });
         if (result.failed || result.text === '')
-          throw new Error('SaluteSpeech не распознал запись.');
+          throw new Error('Сервис распознавания не вернул текст записи.');
         await this.prisma.meetingRecording.update({
           where: { id },
           data: {
@@ -251,7 +251,7 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
           attempts,
           ...(attempts >= 6 ? { status: 'failed' } : {}),
           error:
-            'Не удалось обработать запись. Проверьте настройки LiveKit, хранилища и SaluteSpeech.',
+            'Не удалось обработать запись. Проверьте настройки LiveKit, хранилища и сервиса распознавания.',
         },
       });
     } finally {

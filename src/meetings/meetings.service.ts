@@ -783,6 +783,7 @@ export class MeetingsService {
     });
     if (!m) return { ok: true };
     let allowed = false;
+    let screenShare = false;
     try {
       const { member, moderator, access } = await this.access(
         event.identity,
@@ -800,15 +801,16 @@ export class MeetingsService {
         m.status === 'live' &&
         (moderator ||
           (!m.locked && (!m.waitingRoom || Boolean(member?.admitted))));
+      screenShare = allowed && (moderator || m.allowScreenShare);
     } catch {
       /* Removed membership or invitation must revoke reconnects as well. */
     }
-    if (!allowed)
-      await this.calls.request(m.roomName, '/participant', 'POST', {
-        identity: event.identity,
-        action: 'remove',
-        screenShare: false,
-      });
+    // A still-valid token can predate a role change while the user was offline.
+    await this.calls.request(m.roomName, '/participant', 'POST', {
+      identity: event.identity,
+      action: allowed ? 'permissions' : 'remove',
+      screenShare,
+    });
     return { ok: true };
   }
 }
