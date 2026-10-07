@@ -8,6 +8,7 @@ import { canCompleteTask, canEditAssignedTask } from './task-permissions.js';
 import { scheduleRecurrence } from './task-recurrence.js';
 
 const taskInclude = {
+  meeting: { select: { id: true, title: true, startsAt: true } },
   assignees: { orderBy: { email: 'asc' as const } },
   departments: { include: { department: { select: { id: true, name: true } } } },
 };
@@ -105,19 +106,25 @@ export class TasksService {
     });
   }
 
-  async create(userId: string, workspaceId: string, departmentId: string, dto: TaskDto) {
-    return this.team.transaction(workspaceId, async (tx) => {
+  async createInTransaction(tx: Prisma.TransactionClient, userId: string, workspaceId: string, departmentId: string, dto: TaskDto, meetingId?: string) {
       const access = await this.team.departmentAccess(tx, userId, workspaceId, departmentId);
       this.manager(access.canManage);
-      const { departmentIds, assignees, details } = await this.taskData(tx, access, dto);
+      const unassignedMeetingTask = meetingId && dto.assignees?.length === 0;
+      const { departmentIds, assignees, details } = unassignedMeetingTask
+        ? { departmentIds: [departmentId], assignees: [], details: { title: dto.title, startDate: new Date(dto.startDate || dto.dueDate), dueDate: new Date(dto.dueDate), priority: dto.priority, successCriteria: dto.successCriteria } }
+        : await this.taskData(tx, access, dto);
+      if (details.startDate > details.dueDate) throw new BadRequestException('Дата начала не может быть позже даты окончания.');
       const task = await tx.task.create({
-        data: { ...details, workspaceId, createdById: userId, assignedById: userId, assignedByRole: this.assigningRole(access),
+        data: { ...details, workspaceId, meetingId, createdById: userId, assignedById: userId, assignedByRole: this.assigningRole(access),
           departments: { create: departmentIds.map((departmentId) => ({ departmentId })) },
           assignees: { create: assignees } }, include: taskInclude,
       });
       await this.notifications.assigned(tx, task);
       return this.present(task, userId, access);
-    });
+  }
+
+  async create(userId: string, workspaceId: string, departmentId: string, dto: TaskDto) {
+    return this.team.transaction(workspaceId, tx => this.createInTransaction(tx, userId, workspaceId, departmentId, dto));
   }
 
   private async find(tx: Prisma.TransactionClient, access: Access, id: string, userId: string) {

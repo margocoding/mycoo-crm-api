@@ -38,7 +38,8 @@ export class NotificationsService {
     const items = rows.slice(0, 20).map(({ task, ...item }) => {
       const department = task?.departments.find(d => available.has(d.departmentId) &&
         (available.get(d.departmentId) || task.assignees.some(a => a.departmentId === d.departmentId)));
-      const href = item.kind === 'TASK_ASSIGNED' ? (department ? '/dashboard/tasks/' + department.departmentId : null)
+      const href = item.meetingId ? '/dashboard/calls?meeting=' + item.meetingId + '&workspace=' + workspaceId
+        : item.kind === 'TASK_ASSIGNED' ? (department ? '/dashboard/tasks/' + department.departmentId : null)
         : item.departmentId && available.has(item.departmentId) ? '/dashboard/team/' + item.departmentId : null;
       return { id: item.id, kind: item.kind, message: item.message, readAt: item.readAt, createdAt: item.createdAt, href };
     });

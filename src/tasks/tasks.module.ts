@@ -8,5 +8,5 @@ import { DashboardModule } from '../dashboard/dashboard.module.js';
 import { NotificationsModule } from '../notifications/notifications.module.js';
 import { TaskRecurrenceService } from './task-recurrence.service.js';
 
-@Module({ imports: [BillingCoreModule, AuthModule, TeamModule, DashboardModule, NotificationsModule], controllers: [TasksController], providers: [TasksService, TaskRecurrenceService] })
+@Module({ imports: [BillingCoreModule, AuthModule, TeamModule, DashboardModule, NotificationsModule], controllers: [TasksController], providers: [TasksService, TaskRecurrenceService], exports: [TasksService] })
 export class TasksModule {}
