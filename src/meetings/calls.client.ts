@@ -51,6 +51,7 @@ export class CallsClient {
           ),
         },
       );
+      console.log(response.json())
       if (!response.ok) throw new Error('Calls service failed');
       return (await response.json()) as T;
     } catch (e) {
