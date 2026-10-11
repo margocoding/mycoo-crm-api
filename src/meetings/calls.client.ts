@@ -53,7 +53,8 @@ export class CallsClient {
       );
       if (!response.ok) throw new Error('Calls service failed');
       return (await response.json()) as T;
-    } catch {
+    } catch (e) {
+      console.error(e);
       throw new ServiceUnavailableException(
         'Не удалось связаться с сервисом звонков. Повторите попытку.',
       );
