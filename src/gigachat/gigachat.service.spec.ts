@@ -38,6 +38,36 @@ afterEach(() => {
 });
 
 describe('GigaChat diagnostics', () => {
+  it('requests a strict meeting schema and retains unassigned actions', async () => {
+    const protocol = {
+      summary: 'Обновить сайт, исполнитель и срок пока не определены.',
+      ownerSummary: 'Нужно определить исполнителя и срок.',
+      decisions: [], risks: [], openQuestions: ['Кто и когда обновит сайт?'],
+      tasks: [{ title: 'Обновить сайт', assigneeIds: [], startDate: null,
+        dueDate: null, successCriteria: '', priority: 'medium' }],
+    };
+    const fetchMock = vi.fn().mockResolvedValueOnce(oauth())
+      .mockResolvedValueOnce(chat(JSON.stringify(protocol)));
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await service().analyzeMeeting({ transcript: 'Нужно обновить сайт.' })).toEqual(protocol);
+    const format = JSON.parse(fetchMock.mock.calls[1][1].body).response_format;
+    expect(format.type).toBe('json_schema');
+    expect(format.strict).toBe(true);
+    expect(format.schema.required).toEqual(expect.arrayContaining(Object.keys(protocol)));
+    expect(format.schema.properties.tasks.items.required).toEqual(
+      expect.arrayContaining(Object.keys(protocol.tasks[0])),
+    );
+  });
+
+  it('rejects malformed meeting fields and logs schema failures without response text', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(oauth())
+      .mockResolvedValueOnce(chat('{"summary":"private meeting text","tasks":[{}]}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(service({ GIGACHAT_MAX_RETRIES: 0 }).analyzeMeeting({})).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(Logger.prototype.warn).toHaveBeenCalledWith('Meeting attempt 1 failed: Invalid model response');
+    expect(JSON.stringify(vi.mocked(Logger.prototype.warn).mock.calls)).not.toContain('private meeting text');
+  });
+
   it('uses OAuth, server question text and caches the token', async () => {
     const fetchMock = vi
       .fn()
@@ -54,6 +84,7 @@ describe('GigaChat diagnostics', () => {
       'Как быстро вы узнаёте о проблемах',
     );
     expect(body.messages[1].content).toContain('В реальном времени');
+    expect(body.response_format).toBeUndefined();
     expect(fetchMock.mock.calls[0][1].headers.RqUID).toMatch(/^[0-9a-f-]{36}$/);
   });
 
