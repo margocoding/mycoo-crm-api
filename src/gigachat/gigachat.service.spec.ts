@@ -38,7 +38,7 @@ afterEach(() => {
 });
 
 describe('GigaChat diagnostics', () => {
-  it('requests a strict meeting schema and retains unassigned actions', async () => {
+  it('sends the meeting output contract with a dedicated model and retains unassigned actions', async () => {
     const protocol = {
       summary: 'Обновить сайт, исполнитель и срок пока не определены.',
       ownerSummary: 'Нужно определить исполнителя и срок.',
@@ -49,12 +49,13 @@ describe('GigaChat diagnostics', () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(oauth())
       .mockResolvedValueOnce(chat(JSON.stringify(protocol)));
     vi.stubGlobal('fetch', fetchMock);
-    expect(await service().analyzeMeeting({ transcript: 'Нужно обновить сайт.' })).toEqual(protocol);
-    const format = JSON.parse(fetchMock.mock.calls[1][1].body).response_format;
-    expect(format.type).toBe('json_schema');
-    expect(format.strict).toBe(true);
-    expect(format.schema.required).toEqual(expect.arrayContaining(Object.keys(protocol)));
-    expect(format.schema.properties.tasks.items.required).toEqual(
+    expect(await service({ GIGACHAT_MEETING_MODEL: 'GigaChat-2-Max' }).analyzeMeeting({ transcript: 'Нужно обновить сайт.' })).toEqual(protocol);
+    const request = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(request.model).toBe('GigaChat-2-Max');
+    expect(request.response_format).toBeUndefined();
+    const schema = JSON.parse(request.messages[0].content.split('\nСхема JSON-ответа: ')[1]);
+    expect(schema.required).toEqual(expect.arrayContaining(Object.keys(protocol)));
+    expect(schema.properties.tasks.items.required).toEqual(
       expect.arrayContaining(Object.keys(protocol.tasks[0])),
     );
   });
@@ -75,7 +76,7 @@ describe('GigaChat diagnostics', () => {
       .mockResolvedValueOnce(chat())
       .mockResolvedValueOnce(chat());
     vi.stubGlobal('fetch', fetchMock);
-    const client = service();
+    const client = service({ GIGACHAT_MEETING_MODEL: 'GigaChat-2-Max' });
     expect(await client.analyzeDiagnostics(answer)).toEqual(valid);
     await client.analyzeDiagnostics(answer);
     expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -85,6 +86,7 @@ describe('GigaChat diagnostics', () => {
     );
     expect(body.messages[1].content).toContain('В реальном времени');
     expect(body.response_format).toBeUndefined();
+    expect(body.model).toBe('GigaChat-2');
     expect(fetchMock.mock.calls[0][1].headers.RqUID).toMatch(/^[0-9a-f-]{36}$/);
   });
 
