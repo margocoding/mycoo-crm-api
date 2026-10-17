@@ -9,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { DIAGNOSTICS_QUESTIONS } from '../workspace/constants/diagnostics-question.constant.js';
 import type { ValidatedAnswer } from '../workspace/diagnostics.validation.js';
 import { DASHBOARD_PROMPT, parseDashboardAnalysis } from './dashboard-analysis.js';
-import { MEETING_PROMPT, parseMeetingAnalysis } from '../meetings/meeting-analysis.js';
+import { MEETING_PROMPT, MEETING_OUTPUT_SCHEMA, parseMeetingAnalysis } from '../meetings/meeting-analysis.js';
 
 export interface DiagnosticsAnalysis {
   score: number;
@@ -127,8 +127,11 @@ export class GigachatService {
   }
 
   analyzeMeeting(context: unknown) {
-    return this.complete('Meeting', MEETING_PROMPT, context, parseMeetingAnalysis,
-      'Не удалось составить протокол. Расшифровка сохранена.', 6000);
+    return this.complete('Meeting',
+      MEETING_PROMPT + '\nСхема JSON-ответа: ' + JSON.stringify(MEETING_OUTPUT_SCHEMA),
+      context, parseMeetingAnalysis,
+      'Не удалось составить протокол. Расшифровка сохранена.', 6000,
+      this.config.get<string>('GIGACHAT_MEETING_MODEL'));
   }
 
   prepareMeeting(context: unknown) {
@@ -143,7 +146,8 @@ export class GigachatService {
   }
 
   private async complete<T>(label: string, prompt: string, context: unknown,
-    parse: (content: unknown) => T, message: string, maxTokens = 2000): Promise<T> {
+    parse: (content: unknown) => T, message: string, maxTokens = 2000,
+    model?: string): Promise<T> {
     const deadline = Date.now() + this.totalTimeoutMs;
     const retries = this.number('GIGACHAT_MAX_RETRIES', 5, 0, 5);
     let refreshed = false;
@@ -161,7 +165,7 @@ export class GigachatService {
               Authorization: 'Bearer ' + token,
             },
             body: JSON.stringify({
-              model: this.config.get('GIGACHAT_MODEL', 'GigaChat-2'),
+              model: model || this.config.get('GIGACHAT_MODEL', 'GigaChat-2'),
               temperature: 0.2,
               max_tokens: maxTokens,
               stream: false,
@@ -179,7 +183,12 @@ export class GigachatService {
         const choice = body?.choices?.[0];
         if (choice?.finish_reason !== 'stop')
           throw new UpstreamError('Incomplete model response');
-        return parse(choice?.message?.content);
+        try {
+          return parse(choice?.message?.content);
+        } catch {
+          // Never log model text, user data or credentials as diagnostics.
+          throw new UpstreamError('Invalid model response');
+        }
       } catch (error) {
         const failure =
           error instanceof UpstreamError
