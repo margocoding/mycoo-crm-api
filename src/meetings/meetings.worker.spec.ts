@@ -31,6 +31,13 @@ function fixture(status = 'completed') {
     meetingRecording: {
       updateMany: vi.fn(async ({ where, data }) => {
         if (
+          where.status &&
+          (typeof where.status === 'string'
+            ? recording.status !== where.status
+            : !where.status.in.includes(recording.status))
+        )
+          return { count: 0 };
+        if (
           where.OR &&
           recording.processingUntil &&
           recording.processingUntil > new Date()
@@ -76,6 +83,123 @@ function fixture(status = 'completed') {
   return { meeting, recording, db, calls, make };
 }
 describe('Meeting processing recovery', () => {
+  it('keeps STARTING until Egress confirms capture, and does not submit duplicate starts', async () => {
+    const f = fixture('live');
+    Object.assign(f.recording, {
+      status: 'starting',
+      fileKey: null,
+      egressId: null,
+    });
+    f.calls.request
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({ id: 'eg1', status: 0 });
+    await f.make().recording('r1');
+    expect(f.recording.status).toBe('starting');
+    expect(f.recording.egressId).toBe('eg1');
+    f.calls.request.mockResolvedValueOnce([{ id: 'eg1', status: 1 }]);
+    await f.make().recording('r1');
+    expect(f.recording.status).toBe('recording');
+    expect(
+      f.calls.request.mock.calls.filter(
+        (c) => c[1] === '/recordings' && c[2] === 'POST',
+      ),
+    ).toHaveLength(1);
+  });
+  it('shows an initial start failure, then clears it on recovery and restores frequent polling', async () => {
+    const f = fixture('live');
+    Object.assign(f.recording, {
+      status: 'starting',
+      fileKey: null,
+      egressId: null,
+    });
+    f.calls.request
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('Secret upstream detail'));
+    await f.make().recording('r1');
+    expect(f.recording.status).toBe('starting');
+    expect(f.recording.error).toContain('Не удалось запустить запись.');
+    expect(f.recording.error).not.toContain('Secret upstream detail');
+    Object.assign(f.recording, { attempts: 4 });
+    f.calls.request
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({ id: 'eg1', status: 1 });
+    await f.make().recording('r1');
+    expect(f.recording.status).toBe('recording');
+    expect(f.recording.error).toBeNull();
+    expect(f.recording.attempts).toBe(0);
+    expect(
+      f.recording.nextAttemptAt.getTime() - Date.now(),
+    ).toBeLessThanOrEqual(15_000);
+  });
+  it('does not replace a concurrent stop request when Egress acknowledges a start', async () => {
+    const f = fixture('live');
+    Object.assign(f.recording, {
+      status: 'starting',
+      fileKey: null,
+      egressId: null,
+    });
+    f.calls.request
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(async () => {
+        f.recording.status = 'stopping';
+        return { id: 'eg1', status: 1 };
+      });
+    await f.make().recording('r1');
+    expect(f.recording.status).toBe('stopping');
+    expect(f.recording.egressId).toBe('eg1');
+  });
+  it('does not interpret a failed Egress as active capture', async () => {
+    const f = fixture('live');
+    Object.assign(f.recording, {
+      status: 'starting',
+      fileKey: null,
+      egressId: null,
+    });
+    f.calls.request
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({ id: 'eg1', status: 5 });
+    await f.make().recording('r1');
+    expect(f.recording.status).toBe('starting');
+    expect(f.recording.error).toContain('Не удалось запустить запись.');
+  });
+  it('continues through saving and recognition after a complete Egress output', async () => {
+    const f = fixture();
+    Object.assign(f.recording, {
+      status: 'stopping',
+      fileKey: null,
+      egressId: 'eg1',
+    });
+    f.calls.request
+      .mockResolvedValueOnce([{ id: 'eg1', status: 2 }])
+      .mockResolvedValueOnce([
+        {
+          id: 'eg1',
+          status: 3,
+          files: [{ filename: 'meetings/meeting_one/done.mp4', size: '1000' }],
+        },
+      ])
+      .mockResolvedValueOnce({ text: 'Итог встречи.' });
+    await f.make().recording('r1');
+    expect(f.recording.status).toBe('ready');
+    expect(f.meeting.analysisStatus).toBe('queued');
+    expect(f.recording.fileKey).toBe('meetings/meeting_one/done.mp4');
+  });
+  it('retries a completed Egress without a file instead of polling forever without an error', async () => {
+    const f = fixture('live');
+    Object.assign(f.recording, {
+      status: 'recording',
+      fileKey: null,
+      egressId: 'eg1',
+    });
+    f.calls.request.mockResolvedValueOnce([
+      { id: 'eg1', status: 3, files: [] },
+    ]);
+    await f.make().recording('r1');
+    expect(f.recording.attempts).toBe(1);
+    expect(f.recording.error).toContain(
+      'Не удалось проверить состояние записи.',
+    );
+  });
   it('resumes upload, task and result across worker instances without needing Egress again', async () => {
     const f = fixture();
     f.calls.request

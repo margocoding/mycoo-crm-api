@@ -10,7 +10,11 @@ import { Redis } from 'ioredis';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { GigachatService } from '../gigachat/gigachat.service.js';
-import { CallsClient, type CallRecording } from './calls.client.js';
+import {
+  CallsClient,
+  CallsRequestError,
+  type CallRecording,
+} from './calls.client.js';
 import type { MeetingAnalysis } from './meeting-analysis.js';
 
 @Injectable()
@@ -159,6 +163,16 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
       where: { id },
       include: { meeting: true },
     });
+    let stage: 'inspect' | 'start' | 'stop' | 'transcribe' =
+      row.status === 'starting'
+        ? 'start'
+        : row.status === 'stopping'
+          ? 'stop'
+          : row.status === 'transcribing'
+            ? 'transcribe'
+            : 'inspect';
+    let nextDelay = 15_000;
+    let recovered = false;
     try {
       const room = row.meeting.roomName;
       if (row.status === 'starting' && row.meeting.status !== 'live') {
@@ -174,7 +188,8 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
       let recordings = row.fileKey
         ? []
         : await this.calls.request<CallRecording[]>(room, '/recordings');
-      if (row.status === 'starting') {
+      if (row.status === 'starting' && !row.egressId) {
+        stage = 'start';
         const result = await this.calls.request<CallRecording>(
           room,
           '/recordings',
@@ -184,23 +199,21 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
           where: { id },
           data: { egressId: result.id },
         });
-        await this.prisma.meetingRecording.updateMany({
-          where: { id, status: 'starting' },
-          data: { status: 'recording' },
-        });
+        row.egressId = result.id;
         recordings = [result];
       }
-      if (row.status === 'stopping')
+      if (row.status === 'stopping') {
+        stage = 'stop';
         recordings = await this.calls.request<CallRecording[]>(
           room,
           '/recordings/stop',
           'POST',
         );
+      }
       const egress = row.egressId
         ? recordings.find((e) => e.id === row.egressId)
         : recordings.at(-1);
-      if (!egress && !row.fileKey && row.status !== 'starting')
-        throw new Error('Recording was not found');
+      if (!egress && !row.fileKey) throw new Error('Recording was not found');
       if (egress && !row.egressId)
         await this.prisma.meetingRecording.update({
           where: { id },
@@ -208,10 +221,22 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
         });
       if (egress && [4, 5, 6].includes(egress.status))
         throw new Error('Запись не завершилась. Проверьте Egress и хранилище.');
+      // Egress STARTING is only an acknowledgement, not proof of capture.
+      // Keep stop requests that arrived while the upstream call was pending.
+      if (egress && [0, 1, 2].includes(egress.status))
+        await this.prisma.meetingRecording.updateMany({
+          where: { id, status: { in: ['starting', 'recording'] } },
+          data: {
+            status: ['starting', 'recording', 'stopping'][egress.status],
+          },
+        });
       const key =
         row.fileKey ||
         (egress?.status === 3 ? egress.files?.[0]?.filename : undefined);
+      if (egress?.status === 3 && !key)
+        throw new Error('Completed Egress has no output file');
       if (key) {
+        stage = 'transcribe';
         await this.prisma.meetingRecording.update({
           where: { id },
           data: { fileKey: key, status: 'transcribing' },
@@ -243,15 +268,38 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
         if (result.text !== undefined)
           await this.queueTranscript(row.meetingId);
       }
-    } catch {
+      recovered = true;
+    } catch (error) {
       const attempts = row.attempts + 1;
+      nextDelay = Math.min(15 * 60_000, 30_000 * 2 ** row.attempts);
+      const descriptions = {
+        inspect: 'Не удалось проверить состояние записи.',
+        start: 'Не удалось запустить запись.',
+        stop: 'Не удалось остановить и сохранить запись.',
+        transcribe: 'Не удалось распознать речь в записи.',
+      };
+      this.logger.warn({
+        event: 'meeting_recording_failed',
+        meetingId: row.meetingId,
+        recordingId: id,
+        egressId: row.egressId,
+        stage,
+        attempt: attempts,
+        reason:
+          error instanceof CallsRequestError ? error.reason : 'processing',
+        httpStatus:
+          error instanceof CallsRequestError ? error.upstreamStatus : undefined,
+      });
       await this.prisma.meetingRecording.updateMany({
         where: { id },
         data: {
           attempts,
           ...(attempts >= 6 ? { status: 'failed' } : {}),
           error:
-            'Не удалось обработать запись. Проверьте настройки LiveKit, хранилища и сервиса распознавания.',
+            descriptions[stage] +
+            (attempts >= 6
+              ? ' Автоматические попытки исчерпаны; обратитесь к администратору.'
+              : ' Повторная попытка будет выполнена автоматически.'),
         },
       });
     } finally {
@@ -259,9 +307,8 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
         where: { id, processingUntil: lease },
         data: {
           processingUntil: null,
-          nextAttemptAt: new Date(
-            Date.now() + Math.min(15 * 60_000, 30_000 * 2 ** row.attempts),
-          ),
+          nextAttemptAt: new Date(Date.now() + nextDelay),
+          ...(recovered ? { error: null, attempts: 0 } : {}),
         },
       });
     }

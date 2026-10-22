@@ -1,4 +1,8 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'node:crypto';
 
@@ -7,8 +11,27 @@ export interface CallRecording {
   status: number;
   files?: { filename: string; size: string }[];
 }
+export type CallsFailure =
+  | 'configuration'
+  | 'authentication'
+  | 'storage'
+  | 'livekit'
+  | 'timeout'
+  | 'network'
+  | 'response';
+
+export class CallsRequestError extends ServiceUnavailableException {
+  constructor(
+    readonly reason: CallsFailure,
+    readonly upstreamStatus?: number,
+  ) {
+    super('Не удалось связаться с сервисом звонков. Повторите попытку.');
+  }
+}
+
 @Injectable()
 export class CallsClient {
+  private readonly logger = new Logger(CallsClient.name);
   constructor(private readonly config: ConfigService) {}
   get configured() {
     return Boolean(
@@ -30,8 +53,7 @@ export class CallsClient {
     method = 'GET',
     body?: unknown,
   ): Promise<T> {
-    if (!this.configured)
-      throw new ServiceUnavailableException('Сервис звонков ещё не настроен.');
+    if (!this.configured) throw new CallsRequestError('configuration');
     try {
       const response = await fetch(
         this.config.getOrThrow<string>('CALLS_SERVICE_URL').replace(/\/$/, '') +
@@ -51,13 +73,41 @@ export class CallsClient {
           ),
         },
       );
-      if (!response.ok) throw new Error('Calls service failed');
+      if (!response.ok) {
+        // Only classify known responses. Never copy upstream bodies, URLs or
+        // credentials into browser responses or logs.
+        const payload = (await response.json().catch(() => null)) as {
+          message?: unknown;
+        } | null;
+        const reason: CallsFailure = [401, 403].includes(response.status)
+          ? 'authentication'
+          : payload?.message === 'Recording storage is not configured'
+            ? 'storage'
+            : payload?.message === 'LiveKit is not configured'
+              ? 'livekit'
+              : 'response';
+        throw new CallsRequestError(reason, response.status);
+      }
       return (await response.json()) as T;
     } catch (e) {
-      console.error(e);
-      throw new ServiceUnavailableException(
-        'Не удалось связаться с сервисом звонков. Повторите попытку.',
-      );
+      const failure =
+        e instanceof CallsRequestError
+          ? e
+          : new CallsRequestError(
+              e instanceof Error &&
+                ['TimeoutError', 'AbortError'].includes(e.name)
+                ? 'timeout'
+                : 'network',
+            );
+      this.logger.warn({
+        event: 'calls_request_failed',
+        room,
+        operation: path || '/room',
+        method,
+        reason: failure.reason,
+        httpStatus: failure.upstreamStatus,
+      });
+      throw failure;
     }
   }
 }

@@ -40,6 +40,9 @@ jobs:
       - name: TypeScript Build
         run: npm run build
 
+      - name: Tests
+        run: npm test
+
       - name: GitLeaks Secret Scan
         uses: gitleaks/gitleaks-action@v2
         env:
