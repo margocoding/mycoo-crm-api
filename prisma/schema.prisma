@@ -37,6 +37,7 @@ model User {
   referrals           Referral[]         @relation("Referrer")
   referredBy          Referral?          @relation("ReferredUser")
   paymentOrders       PaymentOrder[]
+  aiCooConversations  AiCooConversation[]
 
   @@map("users")
 }
@@ -89,6 +90,7 @@ model Workspace {
   meetings           Meeting[]
   dashboardSnapshots DashboardSnapshot[]
   notifications      Notification[]
+  aiCooConversations AiCooConversation[]
 
   @@map("workspaces")
 }
@@ -465,4 +467,55 @@ model DashboardSnapshot {
 
   @@index([nextRefreshAt])
   @@map("dashboard_snapshots")
+}
+
+model AiCooConversation {
+  id          String   @id @default(cuid())
+  workspaceId String   @map("workspace_id")
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String   @map("user_id")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scopeKey    String   @map("scope_key")
+  lockToken   String?  @map("lock_token")
+  lockedUntil DateTime? @map("locked_until")
+  requestWindowAt DateTime? @map("request_window_at")
+  requestCount Int @default(0) @map("request_count")
+  createdAt   DateTime @default(now()) @map("created_at")
+  turns       AiCooTurn[]
+  documents   AiCooDocument[]
+
+  @@unique([workspaceId, userId, scopeKey])
+  @@map("ai_coo_conversations")
+}
+
+model AiCooTurn {
+  id             String   @id @default(cuid())
+  conversationId String   @map("conversation_id")
+  conversation   AiCooConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  requestId      String   @map("request_id")
+  question       String
+  answer         String?
+  functionsStateId String? @map("functions_state_id")
+  documents      Json
+  status         String   @default("pending")
+  createdAt      DateTime @default(now()) @map("created_at")
+  completedAt    DateTime? @map("completed_at")
+
+  @@unique([conversationId, requestId])
+  @@index([conversationId, createdAt, id])
+  @@map("ai_coo_turns")
+}
+
+model AiCooDocument {
+  id             String   @id @default(cuid())
+  conversationId String   @map("conversation_id")
+  conversation   AiCooConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  providerFileId String   @map("provider_file_id")
+  name           String
+  size           Int
+  mimeType       String   @map("mime_type")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([conversationId, createdAt])
+  @@map("ai_coo_documents")
 }
