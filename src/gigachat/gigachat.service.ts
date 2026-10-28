@@ -1,4 +1,6 @@
 import {
+  BadRequestException,
+  HttpException,
   Injectable,
   Logger,
   ServiceUnavailableException,
@@ -10,6 +12,8 @@ import { DIAGNOSTICS_QUESTIONS } from '../workspace/constants/diagnostics-questi
 import type { ValidatedAnswer } from '../workspace/diagnostics.validation.js';
 import { DASHBOARD_PROMPT, parseDashboardAnalysis } from './dashboard-analysis.js';
 import { MEETING_PROMPT, MEETING_OUTPUT_SCHEMA, parseMeetingAnalysis } from '../meetings/meeting-analysis.js';
+import { COO_PROMPT } from './coo.types.js';
+import type { CooChatRequest, CooChatResponse, CooDocumentUpload, CooUploadedDocument } from './coo.types.js';
 
 export interface DiagnosticsAnalysis {
   score: number;
@@ -145,56 +149,178 @@ export class GigachatService {
       }, 'Не удалось подготовить повестку. Повторите попытку.');
   }
 
+  async uploadCooDocument(input: CooDocumentUpload): Promise<CooUploadedDocument> {
+    this.validateClientId(input.clientId);
+    if (!input.buffer.byteLength || input.buffer.byteLength > 10 * 1024 * 1024)
+      throw new BadRequestException('Документ должен быть не пустым и не больше 10 МБ.');
+    const mimeTypes: Record<string, string> = {
+      pdf: 'application/pdf',
+      docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    };
+    const name = input.name.replace(/[\r\n\0]/g, '').split(/[\\/]/).pop()?.trim() ?? '';
+    const mimeType = mimeTypes[name.split('.').pop()?.toLowerCase() ?? ''];
+    if (!mimeType || !name || name.length > 255)
+      throw new BadRequestException('Поддерживаются документы PDF, DOCX, XLSX и PPTX.');
+    return this.withAuthorization('AI COO document upload', async (token, deadline) => {
+      const form = new FormData();
+      form.set('purpose', 'general');
+      form.set('file', new Blob([Uint8Array.from(input.buffer)], { type: mimeType }), name);
+      const body = await this.request(this.apiUrl('/files'), {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token, 'X-Client-ID': input.clientId },
+        body: form,
+      }, deadline);
+      if (typeof body?.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(body.id))
+        throw new UpstreamError('Invalid file response', false);
+      return { id: body.id, bytes: input.buffer.byteLength, name };
+    }, 'Не удалось загрузить документ. Попробуйте ещё раз.', {
+      // Uploads have no idempotency key: a network retry could leave an orphan file.
+      retryTransient: false,
+      mapError: (error) => this.cooError(error, true),
+    });
+  }
+
+  async deleteCooDocument(id: string, clientId: string): Promise<void> {
+    this.validateClientId(clientId);
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(id))
+      throw new BadRequestException('Некорректный идентификатор документа.');
+    await this.withAuthorization('AI COO document deletion', async (token, deadline) => {
+      try {
+        await this.request(this.apiUrl('/files/' + encodeURIComponent(id) + '/delete'), {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + token, 'X-Client-ID': clientId },
+        }, deadline);
+      } catch (error) {
+        if (!(error instanceof UpstreamError && error.status === 404)) throw error;
+      }
+    }, 'Не удалось удалить документ из хранилища. Попробуйте ещё раз.');
+  }
+
+  async chatCoo(input: CooChatRequest): Promise<CooChatResponse> {
+    this.validateClientId(input.clientId);
+    if (!input.messages.length || input.messages.length > 41 || input.messages.at(-1)?.role !== 'user')
+      throw new BadRequestException('Некорректная история диалога.');
+    const context = JSON.stringify(input.context);
+    if (!context || context.length > 250_000)
+      throw new BadRequestException({ code: 'AI_COO_CONTEXT_TOO_LARGE', message: 'Слишком много данных для одного запроса.' });
+    const attachments = new Set<string>();
+    const messages = input.messages.map((item) => {
+      if (!['user', 'assistant'].includes(item.role) || typeof item.content !== 'string' || item.content.length > 20_000)
+        throw new BadRequestException('Некорректное сообщение.');
+      if (item.attachments?.some((id) => !/^[a-zA-Z0-9_-]{1,128}$/.test(id)))
+        throw new BadRequestException('Некорректный документ.');
+      if (item.role === 'assistant' && item.attachments?.length)
+        throw new BadRequestException('Документы можно добавлять только к сообщениям пользователя.');
+      for (const id of item.attachments ?? []) attachments.add(id);
+      if (item.functionsStateId && !/^[a-zA-Z0-9_-]{1,128}$/.test(item.functionsStateId))
+        throw new BadRequestException('Некорректное состояние диалога.');
+      return {
+        role: item.role,
+        content: item.content,
+        ...(item.attachments?.length ? { attachments: item.attachments } : {}),
+        ...(item.role === 'assistant' && item.functionsStateId ? { functions_state_id: item.functionsStateId } : {}),
+      };
+    });
+    if (attachments.size > 5 || messages.reduce((length, item) => length + item.content.length, context.length) > 300_000)
+      throw new BadRequestException({ code: 'AI_COO_CONTEXT_TOO_LARGE', message: 'Сократите вопрос или удалите ненужные документы.' });
+    return this.withAuthorization('AI COO chat', async (token, deadline) => {
+      const body = await this.request(this.apiUrl('/chat/completions'), {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + token,
+          'Content-Type': 'application/json',
+          'X-Client-ID': input.clientId,
+          'X-Session-ID': input.clientId,
+        },
+        body: JSON.stringify({
+          model: this.config.get('GIGACHAT_COO_MODEL') || this.config.get('GIGACHAT_MODEL', 'GigaChat-2'),
+          temperature: 0.2,
+          max_tokens: 4000,
+          stream: false,
+          ...(attachments.size ? { function_call: 'auto', functions: [{ name: 'get_file_content' }] } : { function_call: 'none' }),
+          messages: [
+            { role: 'system', content: COO_PROMPT },
+            { role: 'user', content: 'Актуальные данные компании (JSON):\n' + context },
+            ...messages,
+          ],
+        }),
+      }, deadline);
+      const choice = body?.choices?.[0];
+      if (choice?.finish_reason !== 'stop') throw new UpstreamError('Incomplete model response');
+      const content = choice?.message?.content;
+      if (typeof content !== 'string' || !content.trim() || content.length > 20_000)
+        throw new UpstreamError('Invalid model response');
+      const state = choice.message.functions_state_id;
+      if (state != null && (typeof state !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(state)))
+        throw new UpstreamError('Invalid function state');
+      return { content: content.trim(), ...(state ? { functionsStateId: state } : {}) };
+    }, 'Не удалось получить ответ AI COO. Попробуйте ещё раз.', {
+      mapError: (error) => this.cooError(error, attachments.size > 0),
+    });
+  }
+
+  private cooError(error: UpstreamError, hasDocuments: boolean): HttpException | undefined {
+    if (error.status === 422)
+      return new BadRequestException({ code: 'AI_COO_CONTEXT_TOO_LARGE', message: 'GigaChat не смог обработать этот объём данных. Сократите вопрос или удалите ненужные документы.' });
+    if (hasDocuments && error.status === 404)
+      return new BadRequestException({ code: 'AI_COO_DOCUMENT_UNAVAILABLE', message: 'Документ или выбранная модель недоступны в GigaChat. Загрузите документ заново; если ошибка повторяется, обратитесь к администратору.' });
+    if (hasDocuments && [400, 413, 415].includes(error.status ?? 0))
+      return new BadRequestException({ code: 'AI_COO_DOCUMENT_REJECTED', message: 'GigaChat не смог обработать документ. Проверьте формат, размер и наличие читаемого текста.' });
+  }
+
+  private validateClientId(clientId: string) {
+    if (!/^[a-zA-Z0-9_.:-]{1,128}$/.test(clientId))
+      throw new BadRequestException('Некорректный идентификатор диалога.');
+  }
+
+  private apiUrl(path: string) {
+    return this.config.get('GIGACHAT_BASE_URL', 'https://api.giga.chat').replace(/\/$/, '') + '/v1' + path;
+  }
+
   private async complete<T>(label: string, prompt: string, context: unknown,
     parse: (content: unknown) => T, message: string, maxTokens = 2000,
     model?: string): Promise<T> {
+    return this.withAuthorization(label, async (token, deadline) => {
+      const body = await this.request(this.apiUrl('/chat/completions'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+        body: JSON.stringify({
+          model: model || this.config.get('GIGACHAT_MODEL', 'GigaChat-2'),
+          temperature: 0.2, max_tokens: maxTokens, stream: false,
+          messages: [{ role: 'system', content: prompt }, { role: 'user', content: JSON.stringify(context) }],
+        }),
+      }, deadline);
+      const choice = body?.choices?.[0];
+      if (choice?.finish_reason !== 'stop') throw new UpstreamError('Incomplete model response');
+      try {
+        return parse(choice?.message?.content);
+      } catch {
+        // Never log model text, user data or credentials as diagnostics.
+        throw new UpstreamError('Invalid model response');
+      }
+    }, message);
+  }
+
+  private async withAuthorization<T>(label: string,
+    run: (token: string, deadline: number) => Promise<T>, message: string,
+    options: { retryTransient?: boolean; mapError?: (error: UpstreamError) => HttpException | undefined } = {}): Promise<T> {
     const deadline = Date.now() + this.totalTimeoutMs;
     const retries = this.number('GIGACHAT_MAX_RETRIES', 5, 0, 5);
     let refreshed = false;
+    let lastFailure: UpstreamError | undefined;
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
         const token = await this.getToken(deadline);
-        const body = await this.request(
-          this.config
-            .get('GIGACHAT_BASE_URL', 'https://api.giga.chat')
-            .replace(/\/$/, '') + '/v1/chat/completions',
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: 'Bearer ' + token,
-            },
-            body: JSON.stringify({
-              model: model || this.config.get('GIGACHAT_MODEL', 'GigaChat-2'),
-              temperature: 0.2,
-              max_tokens: maxTokens,
-              stream: false,
-              messages: [
-                {
-                  role: 'system',
-                  content: prompt,
-                },
-                { role: 'user', content: JSON.stringify(context) },
-              ],
-            }),
-          },
-          deadline,
-        );
-        const choice = body?.choices?.[0];
-        if (choice?.finish_reason !== 'stop')
-          throw new UpstreamError('Incomplete model response');
-        try {
-          return parse(choice?.message?.content);
-        } catch {
-          // Never log model text, user data or credentials as diagnostics.
-          throw new UpstreamError('Invalid model response');
-        }
+        return await run(token, deadline);
       } catch (error) {
         const failure =
           error instanceof UpstreamError
             ? error
             : new UpstreamError('Network error');
-        let retryable = failure.retryable;
+        lastFailure = failure;
+        let retryable = failure.retryable && options.retryTransient !== false;
         if (failure.status === 401) {
           retryable = !refreshed;
           this.token = undefined;
@@ -219,6 +345,8 @@ export class GigachatService {
         await delay(waitMs);
       }
     }
+    const mappedError = lastFailure && options.mapError?.(lastFailure);
+    if (mappedError) throw mappedError;
     throw new ServiceUnavailableException({
       code: 'GIGACHAT_UNAVAILABLE',
       message,

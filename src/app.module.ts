@@ -11,6 +11,7 @@ import { TasksModule } from './tasks/tasks.module.js';
 import { DashboardModule } from './dashboard/dashboard.module.js';
 import { BillingModule } from './billing/billing.module.js';
 import { MeetingsModule } from './meetings/meetings.module.js';
+import { AiCooModule } from './ai-coo/ai-coo.module.js';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { MeetingsModule } from './meetings/meetings.module.js';
     DashboardModule,
     BillingModule,
     MeetingsModule,
+    AiCooModule,
   ],
 })
 export class AppModule {}
