@@ -9,6 +9,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Length,
   Max,
   MaxLength,
@@ -73,6 +74,14 @@ export class MeetingActionDto {
 }
 export class TranscriptDto {
   @IsString() @Length(1, 250000) text!: string;
+}
+export class GuestMeetingJoinDto {
+  @IsString() @Length(1, 80) name!: string;
+  @IsUUID('4') guestKey!: string;
+}
+export class GuestMeetingActionDto {
+  @IsUUID('4') guestKey!: string;
+  @IsIn(['raise', 'lower']) action!: string;
 }
 export class NotesDto {
   @IsString() @MaxLength(10000) notes!: string;

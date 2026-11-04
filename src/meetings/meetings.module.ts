@@ -11,6 +11,8 @@ import {
 import { MeetingsService } from './meetings.service.js';
 import { CallsClient } from './calls.client.js';
 import { MeetingsWorker } from './meetings.worker.js';
+import { GuestMeetingsController } from './guest-meetings.controller.js';
+import { GuestMeetingsService } from './guest-meetings.service.js';
 @Module({
   imports: [
     AuthModule,
@@ -19,7 +21,16 @@ import { MeetingsWorker } from './meetings.worker.js';
     TasksModule,
     GigachatModule,
   ],
-  controllers: [MeetingsController, MeetingEventsController],
-  providers: [MeetingsService, CallsClient, MeetingsWorker],
+  controllers: [
+    MeetingsController,
+    MeetingEventsController,
+    GuestMeetingsController,
+  ],
+  providers: [
+    MeetingsService,
+    CallsClient,
+    MeetingsWorker,
+    GuestMeetingsService,
+  ],
 })
 export class MeetingsModule {}

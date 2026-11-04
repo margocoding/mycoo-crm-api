@@ -21,6 +21,7 @@ import { parseMeetingAnalysis } from './meeting-analysis.js';
 import { GigachatService } from '../gigachat/gigachat.service.js';
 
 const include = {
+  guests: true,
   participants: {
     include: { user: { select: { id: true, name: true, email: true } } },
   },
@@ -170,15 +171,31 @@ export class MeetingsService {
       endedAt: m.endedAt,
       previousId: m.previousId,
       notes: m.notes,
-      participants: m.participants.map((p) => ({
-        personId: p.userId,
-        role: p.role,
-        name: p.user.name || 'Участник',
-        admitted: p.admitted,
-        removed: p.removed,
-        raisedHand: p.raisedHand,
-        requestedAt: moderator ? p.requestedAt : undefined,
-      })),
+      guestInviteToken: m.guestInviteToken,
+      participants: [
+        ...m.participants.map((p) => ({
+          personId: p.userId,
+          role: p.role,
+          name: p.user.name || 'Участник',
+          admitted: p.admitted,
+          removed: p.removed,
+          raisedHand: p.raisedHand,
+          requestedAt: moderator ? p.requestedAt : undefined,
+          isGuest: false,
+        })),
+        ...m.guests
+          .filter((g) => g.expiresAt.getTime() > Date.now())
+          .map((g) => ({
+            personId: g.id,
+            role: 'participant',
+            name: g.name,
+            admitted: g.admitted,
+            removed: g.removed,
+            raisedHand: g.raisedHand,
+            requestedAt: moderator ? g.requestedAt : undefined,
+            isGuest: true,
+          })),
+      ],
       recordings: m.recordings.map((r) => ({
         id: r.id,
         status: r.status,
@@ -477,30 +494,60 @@ export class MeetingsService {
       if (
         ['admit', 'remove', 'mute', 'cohost', 'participant'].includes(action)
       ) {
-        const target = m.participants.find((p) => p.userId === personId);
-        if (!target || personId === m.organizerId || personId === userId)
-          throw new BadRequestException(
-            'Нельзя выполнить действие с этим участником.',
-          );
-        if (!host && target.role !== 'participant')
-          throw new ForbiddenException(
-            'Соорганизатор управляет только обычными участниками.',
-          );
-        if (action === 'admit')
-          await tx.meetingParticipant.update({
-            where: { id: target.id },
-            data: { admitted: true, requestedAt: null, removed: false },
-          });
-        if (action === 'remove')
-          await tx.meetingParticipant.update({
-            where: { id: target.id },
-            data: { admitted: false, removed: true, requestedAt: null },
-          });
-        if (['cohost', 'participant'].includes(action))
-          await tx.meetingParticipant.update({
-            where: { id: target.id },
-            data: { role: action },
-          });
+        if (personId?.startsWith('guest_')) {
+          const guest = m.guests.find((g) => g.id === personId);
+          if (!guest || guest.expiresAt.getTime() <= Date.now())
+            throw new BadRequestException(
+              'Гость не найден или его сессия истекла.',
+            );
+          if (['cohost', 'participant'].includes(action))
+            throw new ForbiddenException(
+              'Гостям нельзя назначать роли организаторов.',
+            );
+          if (action === 'admit') {
+            if (guest.removed)
+              throw new ForbiddenException('Гостевая сессия отозвана.');
+            await tx.meetingGuest.update({
+              where: { id: guest.id },
+              data: { admitted: true, requestedAt: null },
+            });
+          }
+          if (action === 'remove')
+            await tx.meetingGuest.update({
+              where: { id: guest.id },
+              data: {
+                admitted: false,
+                removed: true,
+                requestedAt: null,
+                raisedHand: false,
+              },
+            });
+        } else {
+          const target = m.participants.find((p) => p.userId === personId);
+          if (!target || personId === m.organizerId || personId === userId)
+            throw new BadRequestException(
+              'Нельзя выполнить действие с этим участником.',
+            );
+          if (!host && target.role !== 'participant')
+            throw new ForbiddenException(
+              'Соорганизатор управляет только обычными участниками.',
+            );
+          if (action === 'admit')
+            await tx.meetingParticipant.update({
+              where: { id: target.id },
+              data: { admitted: true, requestedAt: null, removed: false },
+            });
+          if (action === 'remove')
+            await tx.meetingParticipant.update({
+              where: { id: target.id },
+              data: { admitted: false, removed: true, requestedAt: null },
+            });
+          if (['cohost', 'participant'].includes(action))
+            await tx.meetingParticipant.update({
+              where: { id: target.id },
+              data: { role: action },
+            });
+        }
       }
       if (action === 'start')
         await tx.meeting.update({
@@ -785,23 +832,52 @@ export class MeetingsService {
     let allowed = false;
     let screenShare = false;
     try {
-      const { member, moderator, access } = await this.access(
-        event.identity,
-        m.workspaceId,
-        m.id,
-      );
-      const active = await this.prisma.subscription.count({
-        where: {
-          userId: access.workspace.ownerId,
-          activeUntil: { gt: new Date() },
-        },
-      });
-      allowed =
-        active > 0 &&
-        m.status === 'live' &&
-        (moderator ||
-          (!m.locked && (!m.waitingRoom || Boolean(member?.admitted))));
-      screenShare = allowed && (moderator || m.allowScreenShare);
+      if (event.identity.startsWith('guest_')) {
+        const guest = await this.prisma.meetingGuest.findFirst({
+          where: { id: event.identity, meetingId: m.id },
+        });
+        const workspace = await this.prisma.workspace.findUnique({
+          where: { id: m.workspaceId },
+          select: { ownerId: true },
+        });
+        const active =
+          workspace &&
+          (await this.prisma.subscription.count({
+            where: {
+              userId: workspace.ownerId,
+              activeUntil: { gt: new Date() },
+            },
+          }));
+        allowed = Boolean(
+          active &&
+          guest &&
+          !guest.removed &&
+          guest.admitted &&
+          guest.expiresAt.getTime() > Date.now() &&
+          m.status === 'live' &&
+          !m.roomClosed &&
+          !m.locked,
+        );
+        screenShare = allowed && m.allowScreenShare;
+      } else {
+        const { member, moderator, access } = await this.access(
+          event.identity,
+          m.workspaceId,
+          m.id,
+        );
+        const active = await this.prisma.subscription.count({
+          where: {
+            userId: access.workspace.ownerId,
+            activeUntil: { gt: new Date() },
+          },
+        });
+        allowed =
+          active > 0 &&
+          m.status === 'live' &&
+          (moderator ||
+            (!m.locked && (!m.waitingRoom || Boolean(member?.admitted))));
+        screenShare = allowed && (moderator || m.allowScreenShare);
+      }
     } catch {
       /* Removed membership or invitation must revoke reconnects as well. */
     }
