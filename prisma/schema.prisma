@@ -381,6 +381,7 @@ model Meeting {
   organizerId String @map("organizer_id")
   organizer User @relation("MeetingOrganizer", fields: [organizerId], references: [id])
   roomName String @unique @map("room_name")
+  guestInviteToken String @unique @default(dbgenerated("(gen_random_uuid())::text")) @map("guest_invite_token")
   title String
   kind String @default("operations")
   objective String @default("")
@@ -400,6 +401,7 @@ model Meeting {
   previous Meeting? @relation("MeetingFollowup", fields: [previousId], references: [id], onDelete: SetNull)
   following Meeting[] @relation("MeetingFollowup")
   participants MeetingParticipant[]
+  guests MeetingGuest[]
   recordings MeetingRecording[]
   tasks Task[]
   transcript String @default("")
@@ -430,6 +432,22 @@ model MeetingParticipant {
   raisedHand Boolean @default(false) @map("raised_hand")
   @@unique([meetingId, userId])
   @@map("meeting_participants")
+}
+
+model MeetingGuest {
+  id String @id
+  meetingId String @map("meeting_id")
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  sessionHash String @map("session_hash")
+  name String
+  admitted Boolean @default(false)
+  requestedAt DateTime? @map("requested_at")
+  removed Boolean @default(false)
+  raisedHand Boolean @default(false) @map("raised_hand")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@unique([meetingId, sessionHash])
+  @@map("meeting_guests")
 }
 
 model MeetingRecording {
