@@ -9,6 +9,7 @@ import { AuthController } from "./auth.controller.js";
 import { AuthService } from "./auth.service.js";
 import { JwtAuthGuard } from "./jwt-auth.guard.js";
 import { BillingCoreModule } from '../billing/billing-core.module.js';
+import { PartnerCoreModule } from '../partners/partner-core.module.js';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { BillingCoreModule } from '../billing/billing-core.module.js';
     RedisModule,
     MailModule,
     BillingCoreModule,
+    PartnerCoreModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtAuthGuard],

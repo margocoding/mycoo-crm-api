@@ -31,6 +31,11 @@ export class RobokassaGateway {
     );
   }
 
+  get isTest(): boolean {
+    // Live payments require an explicit opt-in; absent or mistyped configuration stays in test mode.
+    return String(this.config.get('ROBO_KASSA_TEST_MODE', 'true')).trim().toLowerCase() !== 'false';
+  }
+
   private get merchantLogin(): string | undefined {
     return this.config.get<string>('ROBO_KASSA_MERCHANT_LOGIN')?.trim();
   }
@@ -103,8 +108,10 @@ export class RobokassaGateway {
       FailURL: this.failUrl!,
       Culture: 'ru-RU',
       Encoding: 'utf-8',
-      IsTest: '1'
     });
+
+    // Use the order snapshot rather than the current setting when re-opening checkout.
+    if (order.isTest) params.set('IsTest', '1');
 
     if (user?.email) {
       params.set('Email', user.email);

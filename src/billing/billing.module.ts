@@ -6,9 +6,10 @@ import { BillingService } from './billing.service.js';
 import { RobokassaController } from './robokassa.controller.js';
 import { RobokassaGateway } from './robokassa.gateway.js';
 import { RobokassaService } from './robokassa.service.js';
+import { PartnerCoreModule } from '../partners/partner-core.module.js';
 
 @Module({
-  imports: [PrismaModule, AuthModule],
+  imports: [PrismaModule, AuthModule, PartnerCoreModule],
   controllers: [BillingController, RobokassaController],
   providers: [
     BillingService,
