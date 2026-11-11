@@ -23,6 +23,7 @@ import {
   TRIAL_DAYS,
 } from './billing.plans.js';
 import { RobokassaGateway } from './robokassa.gateway.js';
+import { PartnerService } from '../partners/partner.service.js';
 
 @Injectable()
 export class BillingService {
@@ -30,6 +31,7 @@ export class BillingService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly gateway: RobokassaGateway,
+    private readonly partners: PartnerService,
   ) {}
 
   plans() {
@@ -266,7 +268,7 @@ export class BillingService {
       // Keep the original checkout usable after closing the payment page. A reward
       // stays attached to one order because an old provider link can still be paid.
       const pendingDiscount = await tx.paymentOrder.findFirst({
-        where: { userId, plan: dto.plan, period: dto.period, status: 'PENDING', referralDiscountId: { not: null } },
+        where: { userId, plan: dto.plan, period: dto.period, status: 'PENDING', isTest: this.gateway.isTest, referralDiscountId: { not: null } },
         orderBy: { createdAt: 'asc' },
       });
       if (pendingDiscount) return pendingDiscount;
@@ -284,6 +286,7 @@ export class BillingService {
           period: dto.period,
           orderId: randomInt(2 ** 20),
           amountKopecks,
+          isTest: this.gateway.isTest,
           discountPercent,
           referralDiscountId: reward?.id,
           idempotencyKey: dto.idempotencyKey,
@@ -357,10 +360,13 @@ export class BillingService {
           pendingReferralDays: 0,
         },
       });
-      return tx.paymentOrder.update({
+      const paid = await tx.paymentOrder.update({
         where: { id: orderId },
         data: { status: 'PAID', paidAt: now, providerPaymentId },
       });
+      // Subscription and commission commit together after payment verification.
+      await this.partners.creditPayment(tx, paid);
+      return paid;
     });
   }
 

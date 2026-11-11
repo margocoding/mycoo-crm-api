@@ -37,6 +37,8 @@ model User {
   referrals           Referral[]         @relation("Referrer")
   referredBy          Referral?          @relation("ReferredUser")
   paymentOrders       PaymentOrder[]
+  partner             Partner?
+  partnerReferral     PartnerReferral?
   aiCooConversations  AiCooConversation[]
 
   @@map("users")
@@ -199,13 +201,161 @@ model PaymentOrder {
   referralDiscount Referral?        @relation("ReferralDiscount", fields: [referralDiscountId], references: [id])
   currency          String           @default("RUB")
   status            PaymentStatus    @default(PENDING)
+  isTest            Boolean          @default(true) @map("is_test")
   idempotencyKey    String           @map("idempotency_key")
   providerPaymentId String?          @unique @map("provider_payment_id")
   paidAt            DateTime?        @map("paid_at")
   createdAt         DateTime         @default(now()) @map("created_at")
+  partnerPayment    PartnerPayment?
 
   @@unique([userId, idempotencyKey])
   @@map("payment_orders")
+}
+
+model Partner {
+  id            String   @id @default(cuid())
+  userId        String   @unique @map("user_id")
+  user          User     @relation(fields: [userId], references: [id])
+  code          String   @unique
+  name          String
+  company       String   @default("")
+  channel       String   @default("")
+  website       String   @default("")
+  registeredAt  DateTime @default(now()) @map("registered_at")
+  payoutDetails Json?    @map("payout_details")
+  referrals     PartnerReferral[]
+  ledger        PartnerLedgerEntry[]
+  payouts       PartnerPayout[]
+  @@map("partners")
+}
+
+model PartnerReferral {
+  id             String   @id @default(cuid())
+  partnerId      String   @map("partner_id")
+  partner        Partner  @relation(fields: [partnerId], references: [id])
+  referredUserId String   @unique @map("referred_user_id")
+  referredUser   User     @relation(fields: [referredUserId], references: [id])
+  registeredAt   DateTime @default(now()) @map("registered_at")
+  payments       PartnerPayment[]
+  ledger         PartnerLedgerEntry[]
+  @@index([partnerId, registeredAt])
+  @@map("partner_referrals")
+}
+
+model PartnerPayment {
+  id               String   @id @default(cuid())
+  externalId       String   @unique @map("external_id")
+  orderId          String?  @unique @map("order_id")
+  order            PaymentOrder? @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  referralId       String   @map("referral_id")
+  referral         PartnerReferral @relation(fields: [referralId], references: [id])
+  amountKopecks    Int      @map("amount_kopecks")
+  refundedKopecks  Int      @default(0) @map("refunded_kopecks")
+  commissionKopecks Int     @map("commission_kopecks")
+  termsId          String   @map("terms_id")
+  terms            PartnerTerms @relation(fields: [termsId], references: [id])
+  paidAt           DateTime @map("paid_at")
+  availableAt      DateTime @map("available_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+  ledger           PartnerLedgerEntry[]
+  @@index([referralId, paidAt])
+  @@map("partner_payments")
+}
+
+model PartnerLedgerEntry {
+  id            String   @id @default(cuid())
+  partnerId     String   @map("partner_id")
+  partner       Partner  @relation(fields: [partnerId], references: [id])
+  referralId    String?  @map("referral_id")
+  referral      PartnerReferral? @relation(fields: [referralId], references: [id], onDelete: Restrict)
+  paymentId     String?  @map("payment_id")
+  payment       PartnerPayment? @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  kind          String
+  amountKopecks Int      @map("amount_kopecks")
+  availableAt   DateTime @map("available_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+  description   String
+  actorId       String   @map("actor_id")
+  operationKey  String   @unique @map("operation_key")
+  @@index([partnerId, availableAt])
+  @@index([paymentId])
+  @@map("partner_ledger_entries")
+}
+
+model PartnerPayout {
+  id             String   @id @default(cuid())
+  partnerId      String   @map("partner_id")
+  partner        Partner  @relation(fields: [partnerId], references: [id])
+  amountKopecks  Int      @map("amount_kopecks")
+  status         String   @default("new")
+  createdAt      DateTime @default(now()) @map("created_at")
+  reviewNote     String   @default("") @map("review_note")
+  paidAt         DateTime? @map("paid_at")
+  paidKopecks    Int?     @map("paid_kopecks")
+  details        Json
+  events         PartnerPayoutEvent[]
+  @@index([partnerId, status])
+  @@map("partner_payouts")
+}
+
+model PartnerPayoutEvent {
+  id            String   @id @default(cuid())
+  payoutId      String   @map("payout_id")
+  payout        PartnerPayout @relation(fields: [payoutId], references: [id])
+  status        String
+  note          String
+  actorId       String   @map("actor_id")
+  amountKopecks Int?     @map("amount_kopecks")
+  createdAt     DateTime @default(now()) @map("created_at")
+  @@index([payoutId, createdAt])
+  @@map("partner_payout_events")
+}
+
+model PartnerTerms {
+  id                   String   @id @default(cuid())
+  commissionBps        Int      @map("commission_bps")
+  eligibleMonths       Int      @map("eligible_months")
+  holdDays             Int      @map("hold_days")
+  minimumPayoutKopecks Int      @map("minimum_payout_kopecks")
+  effectiveAt          DateTime @default(now()) @map("effective_at")
+  actorId              String   @map("actor_id")
+  payments             PartnerPayment[]
+  @@index([effectiveAt])
+  @@map("partner_terms")
+}
+
+model PartnerOperation {
+  id          String   @id @default(cuid())
+  requestKey  String   @unique @map("request_key")
+  payloadHash String   @map("payload_hash")
+  payload     Json
+  actorId     String   @map("actor_id")
+  kind        String
+  resultId    String   @map("result_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  @@map("partner_operations")
+}
+
+model PartnerAdmin {
+  id           String   @id @default(cuid())
+  login        String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  sessions     PartnerAdminSession[]
+  @@map("partner_admins")
+}
+
+model PartnerAdminSession {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique @map("token_hash")
+  adminId   String   @map("admin_id")
+  admin     PartnerAdmin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([adminId])
+  @@index([expiresAt])
+  @@map("partner_admin_sessions")
 }
 
 enum DepartmentRole {

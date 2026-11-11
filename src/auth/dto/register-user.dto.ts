@@ -9,6 +9,12 @@ import {
 } from "class-validator";
 
 export class RegisterUserDto {
+  @ApiProperty({ required: false, description: 'Код партнёра, пригласившего нового клиента' })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-zA-Z0-9_-]{16,64}$/)
+  readonly partnerCode?: string;
+
   @ApiProperty({ required: false, description: 'Код пригласившего пользователя' })
   @IsOptional()
   @IsString()
