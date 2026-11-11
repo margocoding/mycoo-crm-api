@@ -23,6 +23,7 @@
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
     "postinstall": "prisma skills sync || exit 0",
     "test:partners": "node test/partners.integration.mjs",
+    "test:workspace-oauth": "node test/workspace-oauth.integration.mjs",
     "partner:admin": "node dist/src/partners/admin-cli.js"
   },
   "dependencies": {

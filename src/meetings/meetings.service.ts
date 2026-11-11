@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { TeamService } from '../team/team.service.js';
@@ -202,6 +202,7 @@ export class MeetingsService {
         error: r.error,
         createdAt: r.createdAt,
         downloadable: Boolean(r.fileKey),
+        shareExpiresAt: m.organizerId === userId ? r.shareExpiresAt : undefined,
       })),
       transcript: canReview || m.publishedAt ? m.transcript : null,
       analysis: canReview || m.publishedAt ? m.analysis : null,
@@ -211,6 +212,7 @@ export class MeetingsService {
       publishedAt: m.publishedAt,
       canHost: host,
       canModerate: moderator,
+      canRecord: m.organizerId === userId,
       canReview,
       myRole: host ? 'host' : member?.role || 'participant',
       people: people.map((p) => ({ id: p.id, name: p.name || 'Сотрудник' })),
@@ -473,6 +475,13 @@ export class MeetingsService {
           'Действие доступно организатору или соорганизатору.',
         );
       if (
+        ['record', 'stop-record'].includes(action) &&
+        m.organizerId !== userId
+      )
+        throw new ForbiddenException(
+          'Записью управляет только организатор встречи.',
+        );
+      if (
         ['end', 'cancel', 'cohost', 'participant', 'lock', 'unlock'].includes(
           action,
         ) &&
@@ -581,7 +590,11 @@ export class MeetingsService {
       if (action === 'stop-record' || action === 'end')
         await tx.meetingRecording.updateMany({
           where: { meetingId: id, status: { in: ['starting', 'recording'] } },
-          data: { status: 'stopping', nextAttemptAt: new Date() },
+          data: {
+            status: 'stopping',
+            stopRequestedAt: new Date(),
+            nextAttemptAt: new Date(),
+          },
         });
       return m.roomName;
     });
@@ -749,6 +762,73 @@ export class MeetingsService {
     );
   }
 
+  async shareRecording(
+    userId: string,
+    workspaceId: string,
+    id: string,
+    recordingId: string,
+    enabled: boolean,
+  ) {
+    return this.team.transaction(workspaceId, async (tx) => {
+      const { meeting } = await this.access(userId, workspaceId, id, tx);
+      if (meeting.organizerId !== userId)
+        throw new ForbiddenException(
+          'Ссылкой на запись управляет только организатор.',
+        );
+      const recording = meeting.recordings.find(
+        (row) => row.id === recordingId,
+      );
+      if (!recording?.fileKey)
+        throw new NotFoundException('Запись ещё не готова.');
+      const token = enabled ? randomBytes(32).toString('hex') : null;
+      const expiresAt = enabled
+        ? new Date(Date.now() + 7 * 24 * 60 * 60_000)
+        : null;
+      await tx.meetingRecording.update({
+        where: { id: recordingId },
+        data: {
+          shareTokenHash: token
+            ? createHash('sha256').update(token).digest('hex')
+            : null,
+          shareExpiresAt: expiresAt,
+        },
+      });
+      return { token, expiresAt };
+    });
+  }
+
+  async sharedRecording(token: string) {
+    if (!/^[a-f0-9]{64}$/.test(token))
+      throw new NotFoundException('Ссылка на запись недоступна.');
+    const recording = await this.prisma.meetingRecording.findUnique({
+      where: {
+        shareTokenHash: createHash('sha256').update(token).digest('hex'),
+      },
+      include: {
+        meeting: { include: { workspace: { select: { deletedAt: true } } } },
+      },
+    });
+    if (
+      !recording?.fileKey ||
+      !recording.shareExpiresAt ||
+      recording.shareExpiresAt <= new Date() ||
+      recording.meeting.workspace.deletedAt
+    )
+      throw new NotFoundException('Ссылка на запись истекла или отозвана.');
+    const { url } = await this.calls.request<{ url: string }>(
+      recording.meeting.roomName,
+      '/recordings/url',
+      'POST',
+      { key: recording.fileKey },
+    );
+    return {
+      title: recording.meeting.title,
+      createdAt: recording.createdAt,
+      expiresAt: recording.shareExpiresAt,
+      url,
+    };
+  }
+
   async retryRecording(
     userId: string,
     workspaceId: string,
@@ -766,6 +846,7 @@ export class MeetingsService {
       where: { id: r.id },
       data: {
         status: r.fileKey ? 'transcribing' : 'stopping',
+        stopRequestedAt: r.fileKey ? r.stopRequestedAt : new Date(),
         attempts: 0,
         error: null,
         nextAttemptAt: new Date(),
@@ -838,10 +919,11 @@ export class MeetingsService {
         });
         const workspace = await this.prisma.workspace.findUnique({
           where: { id: m.workspaceId },
-          select: { ownerId: true },
+          select: { ownerId: true, deletedAt: true },
         });
         const active =
           workspace &&
+          !workspace.deletedAt &&
           (await this.prisma.subscription.count({
             where: {
               userId: workspace.ownerId,

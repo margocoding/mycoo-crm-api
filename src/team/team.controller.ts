@@ -6,6 +6,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 import { BillingGuard } from '../billing/billing.guard.js';
 import { AcceptInvitationDto, DepartmentDto, InvitationDto, MemberDepartmentsDto, MemberRoleDto } from './dto/team.dto.js';
 import { TeamService } from './team.service.js';
+import { OptionalJwtAuthGuard } from '../auth/optional-jwt-auth.guard.js';
 
 interface AuthenticatedRequest extends Request { user: JwtPayload; }
 
@@ -71,8 +72,9 @@ export class InvitationsController {
   get(@Param('token') token: string) { return this.team.getInvitation(token); }
 
   @Post(':token/accept')
+  @UseGuards(OptionalJwtAuthGuard)
   @HttpCode(200)
-  accept(@Param('token') token: string, @Body() dto: AcceptInvitationDto) {
-    return this.team.accept(token, dto.password);
+  accept(@Param('token') token: string, @Body() dto: AcceptInvitationDto, @Req() req: AuthenticatedRequest) {
+    return this.team.accept(token, dto.password, req.user?.sub);
   }
 }

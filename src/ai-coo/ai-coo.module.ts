@@ -6,10 +6,11 @@ import { GigachatModule } from '../gigachat/gigachat.module.js';
 import { AiCooController } from './ai-coo.controller.js';
 import { AiCooService } from './ai-coo.service.js';
 import { AiCooContextService } from './ai-coo-context.service.js';
+import { AiCooLinksService } from './ai-coo-links.service.js';
 
 @Module({
   imports: [AuthModule, BillingCoreModule, TeamModule, GigachatModule],
   controllers: [AiCooController],
-  providers: [AiCooService, AiCooContextService],
+  providers: [AiCooService, AiCooContextService, AiCooLinksService],
 })
 export class AiCooModule {}

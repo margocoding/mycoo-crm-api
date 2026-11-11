@@ -190,11 +190,12 @@ export class BillingService {
     const workspace = await this.prisma.workspace.findFirst({
       where: {
         id: workspaceId,
+        deletedAt: null,
         OR: [{ ownerId: userId }, { members: { some: { userId } } }],
       },
       select: { ownerId: true },
     });
-    if (!workspace) throw new NotFoundException('Workspace не найден.');
+    if (!workspace) throw new NotFoundException({ code: 'WORKSPACE_UNAVAILABLE', message: 'Компания удалена или доступ к ней прекращён.' });
     if (!(await this.summary(workspace.ownerId)).hasAccess) this.expired();
   }
 
@@ -210,7 +211,7 @@ export class BillingService {
     if (
       dto.workspaceId &&
       !(await this.prisma.workspace.findFirst({
-        where: { id: dto.workspaceId, ownerId: userId },
+        where: { id: dto.workspaceId, ownerId: userId, deletedAt: null },
         select: { id: true },
       }))
     )

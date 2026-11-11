@@ -9,6 +9,7 @@ import { timingSafeEqual } from 'node:crypto';
 export interface CallRecording {
   id: string;
   status: number;
+  recordingId?: string;
   files?: { filename: string; size: string }[];
 }
 

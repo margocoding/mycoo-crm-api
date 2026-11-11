@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Header, Post, Put, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Header, Param, Post, Put, Query, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import type { JwtPayload } from '../../common/types/auth.types.js';
@@ -30,4 +30,16 @@ export class PartnerController {
 
   @Post('me/payouts') @ApiBearerAuth() @UseGuards(JwtAuthGuard)
   payout(@Req() req: PartnerRequest, @Body() dto: RequestPartnerPayoutDto) { return this.partners.requestPayout(userId(req), dto); }
+
+  @Get('me/ledger') @Header('Cache-Control', 'no-store') @ApiBearerAuth() @UseGuards(JwtAuthGuard)
+  ledger(@Req() req: PartnerRequest, @Query('cursor') cursor?: string) { return this.partners.ledger(userId(req), cursor); }
+
+  @Get('me/notifications') @Header('Cache-Control', 'no-store') @ApiBearerAuth() @UseGuards(JwtAuthGuard)
+  notifications(@Req() req: PartnerRequest, @Query('cursor') cursor?: string) { return this.partners.notifications(userId(req), cursor); }
+
+  @Post('me/notifications/read-all') @ApiBearerAuth() @UseGuards(JwtAuthGuard)
+  readAll(@Req() req: PartnerRequest) { return this.partners.readNotification(userId(req)); }
+
+  @Post('me/notifications/:id/read') @ApiBearerAuth() @UseGuards(JwtAuthGuard)
+  read(@Req() req: PartnerRequest, @Param('id') id: string) { return this.partners.readNotification(userId(req), id); }
 }

@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -21,6 +22,7 @@ import { fillDto } from '../../common/utils/fill-dto.util.js';
 import { GigachatService } from '../gigachat/gigachat.service.js';
 import { validateAnswers } from './diagnostics.validation.js';
 import { BillingService } from '../billing/billing.service.js';
+import { assertSingleWorkspace, lockMembership } from './workspace-membership.js';
 
 @Injectable()
 export class WorkspaceService {
@@ -39,20 +41,22 @@ export class WorkspaceService {
     const data = this.companyData(dto);
     const workspace = await this.prisma.$transaction(async (tx) => {
       // Serialize creation per owner, including retries after a lost response.
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${userId}))`;
+      await lockMembership(tx, userId);
       const current = workspaceId
         ? await this.owned(tx, userId, workspaceId)
         : await tx.workspace.findFirst({
-            where: { ownerId: userId, diagnosticsComplete: false },
+            where: { ownerId: userId, deletedAt: null, diagnosticsComplete: false },
             orderBy: { createdAt: 'desc' },
           });
       if (current) {
+        await assertSingleWorkspace(tx, userId, current.id);
         this.assertEditable(current);
         return this.updateDraft(tx, current, {
           ...data,
           onboardingStep: Math.max(current.onboardingStep, 1),
         });
       }
+      await assertSingleWorkspace(tx, userId);
       return tx.workspace.create({
         data: {
           ...data,
@@ -132,7 +136,7 @@ export class WorkspaceService {
     const workspace = dto.workspaceId
       ? await this.owned(this.prisma, userId, dto.workspaceId)
       : await this.prisma.workspace.findFirst({
-          where: { ownerId: userId, onboardingComplete: true },
+          where: { ownerId: userId, deletedAt: null, onboardingComplete: true },
           orderBy: { createdAt: 'desc' },
         });
     if (!workspace?.onboardingComplete)
@@ -150,6 +154,7 @@ export class WorkspaceService {
       const claim = await tx.workspace.updateMany({
         where: {
           id: workspace.id,
+          deletedAt: null,
           diagnosticsAnalysis: { equals: Prisma.DbNull },
           OR: [
             { diagnosticsProcessingAt: null },
@@ -180,7 +185,7 @@ export class WorkspaceService {
       await this.prisma.$transaction(async tx => {
         const trialStartedAt = await this.billing.startTrial(tx, userId);
         const result = await tx.workspace.updateMany({
-          where: { id: workspace.id, diagnosticsProcessingAt: claimTime },
+          where: { id: workspace.id, deletedAt: null, diagnosticsProcessingAt: claimTime },
           data: {
             diagnosticsAnalysis: analysis as unknown as Prisma.InputJsonValue,
             diagnosticsComplete: true,
@@ -206,7 +211,7 @@ export class WorkspaceService {
 
   async getWorkspaces(userId: string): Promise<WorkspaceRdo[]> {
     const workspaces = await this.prisma.workspace.findMany({
-      where: { OR: [{ ownerId: userId }, { members: { some: { userId } } }] },
+      where: { deletedAt: null, OR: [{ ownerId: userId }, { members: { some: { userId } } }] },
       orderBy: { createdAt: 'desc' },
     });
     return Promise.all(workspaces.map((w) => this.workspaceForUser(w, userId)));
@@ -219,6 +224,7 @@ export class WorkspaceService {
     const workspace = await this.prisma.workspace.findFirst({
       where: {
         id: workspaceId,
+        deletedAt: null,
         OR: [{ ownerId: userId }, { members: { some: { userId } } }],
       },
       include: {
@@ -227,7 +233,7 @@ export class WorkspaceService {
         },
       },
     });
-    if (!workspace) throw new NotFoundException('Workspace не найден.');
+    if (!workspace) throw new NotFoundException({ code: 'WORKSPACE_UNAVAILABLE', message: 'Компания удалена или доступ к ней прекращён.' });
     return this.workspaceForUser(workspace, userId);
   }
 
@@ -251,14 +257,63 @@ export class WorkspaceService {
     });
   }
 
+  async leave(userId: string, workspaceId: string) {
+    return this.prisma.$transaction(async tx => {
+      await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', 'team:' + workspaceId);
+      await lockMembership(tx, userId);
+      const workspace = await tx.workspace.findFirst({ where: { id: workspaceId, deletedAt: null } });
+      if (!workspace) throw new NotFoundException('Компания не найдена.');
+      if (workspace.ownerId === userId) throw new ForbiddenException('Собственник может удалить компанию, но не выйти из неё.');
+      const member = await tx.workspaceMember.findUnique({ where: { userId_workspaceId: { userId, workspaceId } } });
+      if (!member) return { success: true };
+      await tx.teamInvitation.updateMany({ where: { invitedById: userId, department: { workspaceId }, acceptedAt: null, revokedAt: null }, data: { revokedAt: new Date() } });
+      await tx.taskAssignee.deleteMany({ where: { userId, task: { workspaceId } } });
+      await tx.departmentMember.deleteMany({ where: { userId, department: { workspaceId } } });
+      await tx.meetingParticipant.updateMany({ where: { userId, meeting: { workspaceId } }, data: { removed: true, admitted: false, requestedAt: null } });
+      await this.closeMeetings(tx, workspaceId, userId);
+      await tx.aiCooConversation.updateMany({ where: { workspaceId, userId }, data: { lockToken: null, lockedUntil: null } });
+      await tx.notification.updateMany({ where: { workspaceId, recipientId: userId, emailStatus: 'PENDING' }, data: { emailStatus: 'SKIPPED' } });
+      await tx.workspaceMember.delete({ where: { id: member.id } });
+      return { success: true };
+    });
+  }
+
+  async remove(userId: string, workspaceId: string) {
+    return this.prisma.$transaction(async tx => {
+      await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', 'team:' + workspaceId);
+      await lockMembership(tx, userId);
+      const workspace = await tx.workspace.findUnique({ where: { id: workspaceId } });
+      if (!workspace || workspace.ownerId !== userId) throw new NotFoundException('Компания не найдена.');
+      if (workspace.deletedAt) return { success: true };
+      await tx.workspace.update({ where: { id: workspaceId }, data: { deletedAt: new Date(), isActive: false, diagnosticsProcessingAt: null } });
+      await tx.teamInvitation.updateMany({ where: { department: { workspaceId }, acceptedAt: null, revokedAt: null }, data: { revokedAt: new Date() } });
+      await tx.workspaceMember.deleteMany({ where: { workspaceId } });
+      await tx.departmentMember.deleteMany({ where: { department: { workspaceId } } });
+      await tx.task.updateMany({ where: { workspaceId }, data: { repeatDays: [], nextRepeatAt: null } });
+      await tx.dashboardSnapshot.updateMany({ where: { workspaceId }, data: { processingAt: null, revision: { increment: 1 } } });
+      await tx.aiCooConversation.updateMany({ where: { workspaceId }, data: { lockToken: null, lockedUntil: null } });
+      await tx.notification.updateMany({ where: { workspaceId, emailStatus: 'PENDING' }, data: { emailStatus: 'SKIPPED' } });
+      await this.closeMeetings(tx, workspaceId);
+      return { success: true };
+    });
+  }
+
+  private async closeMeetings(tx: Prisma.TransactionClient, workspaceId: string, organizerId?: string) {
+    const where = { workspaceId, ...(organizerId ? { organizerId } : {}) };
+    await tx.meetingRecording.updateMany({ where: { meeting: where, status: { in: ['starting', 'recording'] } },
+      data: { status: 'stopping', stopRequestedAt: new Date(), nextAttemptAt: new Date() } });
+    await tx.meeting.updateMany({ where: { ...where, status: 'live' }, data: { status: 'completed', endedAt: new Date(), roomClosed: false } });
+    await tx.meeting.updateMany({ where: { ...where, status: 'scheduled' }, data: { status: 'cancelled', endedAt: new Date(), roomClosed: false } });
+  }
+
   async getWorkspaceStatus(userId: string) {
     const membership = await this.prisma.workspaceMember.findFirst({
-      where: { userId },
+      where: { userId, workspace: { deletedAt: null } },
       orderBy: { createdAt: 'desc' },
       include: { workspace: true },
     });
     const workspace = membership?.workspace ?? await this.prisma.workspace.findFirst({
-      where: { ownerId: userId },
+      where: { ownerId: userId, deletedAt: null },
       orderBy: { createdAt: 'desc' },
     });
     return {
@@ -283,6 +338,7 @@ export class WorkspaceService {
     const updated = await tx.workspace.updateMany({
       where: {
         id: workspace.id,
+        deletedAt: null,
         ownerId: workspace.ownerId,
         onboardingStep: workspace.onboardingStep,
         diagnosticsComplete: false,
@@ -303,7 +359,7 @@ export class WorkspaceService {
     id: string,
   ) {
     const workspace = await db.workspace.findFirst({
-      where: { id, ownerId: userId },
+      where: { id, ownerId: userId, deletedAt: null },
     });
     if (!workspace) throw new NotFoundException('Workspace не найден.');
     return workspace;

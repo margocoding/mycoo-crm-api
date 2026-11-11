@@ -10,9 +10,9 @@ export class NotificationsService {
   constructor(private readonly prisma: PrismaService) {}
 
   private async access(userId: string, workspaceId: string) {
-    const workspace = await this.prisma.workspace.findFirst({ where: { id: workspaceId,
+    const workspace = await this.prisma.workspace.findFirst({ where: { id: workspaceId, deletedAt: null,
       OR: [{ ownerId: userId }, { members: { some: { userId } } }] }, select: { ownerId: true } });
-    if (!workspace) throw new NotFoundException('Компания не найдена.');
+    if (!workspace) throw new NotFoundException({ code: 'WORKSPACE_UNAVAILABLE', message: 'Компания удалена или доступ к ней прекращён.' });
     return workspace;
   }
 

@@ -10,7 +10,7 @@ vi.mock('../../prisma/prisma.service.js', () => ({ PrismaService: class {} }));
 
 describe('partner access boundaries', () => {
   it('requires the independent administrator guard on every private admin endpoint', () => {
-    for (const endpoint of ['session', 'logout', 'credentials', 'data', 'terms', 'review', 'pay', 'adjustment', 'payment', 'refund'] as const) {
+    for (const endpoint of ['session', 'logout', 'credentials', 'data', 'history', 'terms', 'review', 'pay', 'adjustment', 'payment', 'refund'] as const) {
       expect(Reflect.getMetadata(GUARDS_METADATA, PartnerAdminController.prototype[endpoint])).toContain(PartnerAdminGuard);
     }
   });

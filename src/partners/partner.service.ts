@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { Prisma, PartnerTerms, PaymentOrder } from '../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { accountBalance, addMonths, DAY, eventDate, kopecks, proportional } from './partner.money.js';
+import { pageAfter, payoutNotification } from './partner.notifications.js';
 
 type Tx = Prisma.TransactionClient;
 type Details = { recipient: string; taxId: string; bank: string; account: string; bic: string; legalForm: 'self-employed' | 'entrepreneur' | 'company' };
@@ -54,6 +55,69 @@ export class PartnerService {
 
   async getTerms() { return this.termsView(await this.termsAt(this.prisma)); }
 
+  private validateCursor(cursor?: string) {
+    if (cursor !== undefined && (typeof cursor !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(cursor))) throw new BadRequestException('Некорректная страница.');
+  }
+
+  async ledger(userId: string, cursor?: string) {
+    this.validateCursor(cursor);
+    const partner = await this.own(this.prisma, userId);
+    const after = cursor ? await this.prisma.partnerLedgerEntry.findFirst({ where: { id: cursor, partnerId: partner.id } }) : null;
+    if (cursor && !after) throw new BadRequestException('Страница недоступна. Обновите историю.');
+    const rows = await this.prisma.partnerLedgerEntry.findMany({ where: { partnerId: partner.id, ...pageAfter(after) },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 21, include: { payment: { select: { externalId: true } } } });
+    const items = rows.slice(0, 20).map(e => ({ id: e.id, partnerId: e.partnerId, referralId: e.referralId, paymentId: e.payment?.externalId ?? null,
+      kind: e.kind, amount: e.amountKopecks / 100, createdAt: e.createdAt.toISOString(), availableAt: e.availableAt.toISOString(), description: e.description }));
+    return { items, nextCursor: rows.length > 20 ? items[items.length - 1].id : null };
+  }
+
+  async notifications(userId: string, cursor?: string) {
+    this.validateCursor(cursor);
+    const partner = await this.own(this.prisma, userId);
+    const where = { partnerId: partner.id };
+    const after = cursor ? await this.prisma.partnerNotification.findFirst({ where: { ...where, id: cursor } }) : null;
+    if (cursor && !after) throw new BadRequestException('Страница недоступна. Обновите уведомления.');
+    const [rows, unreadCount] = await Promise.all([
+      this.prisma.partnerNotification.findMany({ where: { ...where, ...pageAfter(after) }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 21,
+        select: { id: true, title: true, message: true, readAt: true, createdAt: true } }),
+      this.prisma.partnerNotification.count({ where: { ...where, readAt: null } }),
+    ]);
+    const items = rows.slice(0, 20);
+    return { items, unreadCount, nextCursor: rows.length > 20 ? items[items.length - 1].id : null };
+  }
+
+  async readNotification(userId: string, id?: string) {
+    const partner = await this.own(this.prisma, userId);
+    const where = { partnerId: partner.id, ...(id ? { id } : {}) };
+    if (id && !await this.prisma.partnerNotification.findFirst({ where, select: { id: true } })) throw new NotFoundException('Уведомление не найдено.');
+    await this.prisma.partnerNotification.updateMany({ where: { ...where, readAt: null, createdAt: { lte: new Date() } }, data: { readAt: new Date() } });
+    return { ok: true };
+  }
+
+  private async actorNames(tx: Tx, values: string[]) {
+    const ids = [...new Set(values)];
+    const [admins, partners] = await Promise.all([
+      tx.partnerAdmin.findMany({ where: { id: { in: ids.filter(id => id.startsWith('admin:')).map(id => id.slice(6)) } }, select: { id: true, login: true } }),
+      tx.partner.findMany({ where: { userId: { in: ids.filter(id => id.startsWith('user:')).map(id => id.slice(5)) } }, select: { userId: true, name: true } }),
+    ]);
+    return new Map<string, string>([['billing', 'Платёжная система'], ...admins.map(a => [`admin:${a.id}`, `Администратор ${a.login}`] as [string, string]), ...partners.map(p => [`user:${p.userId}`, p.name] as [string, string])]);
+  }
+
+  async payoutHistory(id: string) {
+    if (!await this.prisma.partnerPayout.findUnique({ where: { id }, select: { id: true } })) throw new NotFoundException('Заявка не найдена.');
+    const events = await this.prisma.partnerPayoutEvent.findMany({ where: { payoutId: id }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+    const actors = await this.actorNames(this.prisma, events.map(e => e.actorId));
+    return { items: events.map(e => ({ id: e.id, status: e.status, note: e.note, actor: actors.get(e.actorId) ?? e.actorId,
+      createdAt: e.createdAt.toISOString(), amount: e.amountKopecks === null ? null : e.amountKopecks / 100 })) };
+  }
+
+  private async payoutEvent(tx: Tx, data: { partnerId: string; payoutId: string; status: string; note: string; actorId: string; amountKopecks: number }, notify = true) {
+    const { partnerId, ...event } = data;
+    const created = await tx.partnerPayoutEvent.create({ data: event });
+    const notification = notify ? payoutNotification(data.status, data.payoutId, data.amountKopecks, data.note) : null;
+    if (notification) await tx.partnerNotification.create({ data: { partnerId, eventId: created.id, ...notification } });
+  }
+
   async register(userId: string, input: { name: string; company: string; channel?: string; website?: string }) {
     const data = { name: text(input.name, 120), company: text(input.company, 150, false), channel: text(input.channel, 250, false), website: text(input.website, 500, false) };
     return this.transaction(async tx => {
@@ -78,14 +142,16 @@ export class PartnerService {
     return this.prisma.$transaction(async tx => {
       const partners = await tx.partner.findMany({ where: userId ? { userId } : {}, include: { user: { select: { email: true } } }, orderBy: [{ registeredAt: 'desc' }, { id: 'asc' }] });
       const ids = partners.map(p => p.id);
-      const [referrals, payments, ledger, payouts, terms] = await Promise.all([
+      const [referrals, payments, ledger, payouts, terms, notificationUnreadCount] = await Promise.all([
         tx.partnerReferral.findMany({ where: { partnerId: { in: ids } }, include: { referredUser: { select: { subscriptions: { orderBy: { activeUntil: 'desc' }, take: 1 }, ownedWorkspaces: { select: { company: true }, orderBy: { createdAt: 'asc' }, take: 1 } } } }, orderBy: [{ registeredAt: 'desc' }, { id: 'asc' }] }),
         tx.partnerPayment.findMany({ where: { referral: { partnerId: { in: ids } } }, orderBy: [{ paidAt: 'desc' }, { id: 'asc' }] }),
         tx.partnerLedgerEntry.findMany({ where: { partnerId: { in: ids } }, include: { payment: { select: { externalId: true } } }, orderBy: [{ createdAt: 'desc' }, { id: 'asc' }] }),
         tx.partnerPayout.findMany({ where: { partnerId: { in: ids } }, orderBy: [{ createdAt: 'desc' }, { id: 'asc' }] }),
         this.termsAt(tx),
+        userId ? tx.partnerNotification.count({ where: { partnerId: { in: ids }, readAt: null } }) : Promise.resolve(0),
       ]);
       const now = new Date();
+      const actors = userId ? new Map<string, string>() : await this.actorNames(tx, ledger.map(e => e.actorId));
       return {
         partners: partners.map(p => ({ id: p.id, code: p.code, name: p.name, email: p.user.email, company: p.company, channel: p.channel, website: p.website, registeredAt: p.registeredAt.toISOString(), payoutDetails: p.payoutDetails })),
         referrals: referrals.map(r => {
@@ -94,9 +160,10 @@ export class PartnerService {
           return { id: r.id, partnerId: r.partnerId, company: r.referredUser.ownedWorkspaces[0]?.company || 'Компания не указана', registeredAt: r.registeredAt.toISOString(), status };
         }),
         payments: payments.map(p => ({ id: p.externalId, referralId: p.referralId, amount: p.amountKopecks / 100, refundedAmount: p.refundedKopecks / 100, paidAt: p.paidAt.toISOString() })),
-        ledger: ledger.map(e => ({ id: e.id, partnerId: e.partnerId, referralId: e.referralId, paymentId: e.payment?.externalId ?? null, kind: e.kind, amount: e.amountKopecks / 100, createdAt: e.createdAt.toISOString(), availableAt: e.availableAt.toISOString(), description: e.description })),
+        ledger: ledger.map(e => ({ id: e.id, partnerId: e.partnerId, referralId: e.referralId, paymentId: e.payment?.externalId ?? null, kind: e.kind, amount: e.amountKopecks / 100, createdAt: e.createdAt.toISOString(), availableAt: e.availableAt.toISOString(), description: e.description, ...(!userId ? { actor: actors.get(e.actorId) ?? e.actorId } : {}) })),
         payouts: payouts.map(p => ({ id: p.id, partnerId: p.partnerId, amount: p.amountKopecks / 100, status: p.status, createdAt: p.createdAt.toISOString(), reviewNote: p.reviewNote, paidAt: p.paidAt?.toISOString() ?? null, paidAmount: p.paidKopecks === null ? null : p.paidKopecks / 100, details: p.details })),
         terms: this.termsView(terms), currentPartnerId: userId ? partners[0]?.id ?? '' : '',
+        notificationUnreadCount,
       };
     }, { isolationLevel: 'RepeatableRead' });
   }
@@ -160,14 +227,14 @@ export class PartnerService {
       if (amountKopecks < terms.minimumPayoutKopecks) throw new BadRequestException('Сумма меньше минимальной выплаты.');
       if ((await this.balance(tx, partner.id)).available < amountKopecks) throw new ConflictException('Недостаточно доступных средств.');
       const payout = await tx.partnerPayout.create({ data: { partnerId: partner.id, amountKopecks, details: current.payoutDetails as Prisma.InputJsonValue } });
-      await tx.partnerPayoutEvent.create({ data: { payoutId: payout.id, status: 'new', note: 'Заявка создана партнёром', actorId: actor, amountKopecks } });
+      await this.payoutEvent(tx, { partnerId: partner.id, payoutId: payout.id, status: 'new', note: 'Заявка создана партнёром', actorId: actor, amountKopecks });
       return this.recordOperation(tx, key, payload, actor, 'payout', payout.id);
     });
   }
 
   async reviewPayout(adminId: string, id: string, input: { status: 'review' | 'approved' | 'rejected'; reason?: string }) {
     if (!['review', 'approved', 'rejected'].includes(input.status)) throw new BadRequestException('Некорректный статус.');
-    const note = text(input.reason, 2000, input.status === 'rejected');
+    const note = text(input.reason, 2000, input.status === 'rejected') || (input.status === 'approved' ? 'Заявка одобрена администратором' : 'Заявка взята на проверку');
     return this.transaction(async tx => {
       const initial = await tx.partnerPayout.findUnique({ where: { id } });
       if (!initial) throw new NotFoundException('Заявка не найдена.');
@@ -178,7 +245,7 @@ export class PartnerService {
       if (payout.status === 'approved' && input.status === 'review') throw new ConflictException('Одобренную заявку нельзя вернуть на проверку.');
       if (input.status === 'approved' && (await this.balance(tx, payout.partnerId)).available < 0) throw new ConflictException('Баланс изменился. Недостаточно средств для одобрения выплаты.');
       await tx.partnerPayout.update({ where: { id }, data: { status: input.status, reviewNote: note } });
-      await tx.partnerPayoutEvent.create({ data: { payoutId: id, status: input.status, note, actorId: `admin:${adminId}` } });
+      await this.payoutEvent(tx, { partnerId: payout.partnerId, payoutId: id, status: input.status, note, actorId: `admin:${adminId}`, amountKopecks: payout.amountKopecks }, payout.status !== input.status);
       return ok(id);
     });
   }
@@ -198,7 +265,7 @@ export class PartnerService {
       if ((await this.balance(tx, payout.partnerId, id)).available < amountKopecks) throw new ConflictException('Баланс изменился. Недостаточно средств для выплаты.');
       const paidAt = eventDate(input.date, payout.createdAt);
       await tx.partnerPayout.update({ where: { id }, data: { status: 'paid', paidKopecks: amountKopecks, paidAt } });
-      await tx.partnerPayoutEvent.create({ data: { payoutId: id, status: 'paid', note: `Выплата зафиксирована за ${paidAt.toISOString()}`, actorId: actor, amountKopecks } });
+      await this.payoutEvent(tx, { partnerId: payout.partnerId, payoutId: id, status: 'paid', note: `Выплата зафиксирована за ${paidAt.toISOString()}`, actorId: actor, amountKopecks });
       return this.recordOperation(tx, key, payload, actor, 'paid', id);
     });
   }
