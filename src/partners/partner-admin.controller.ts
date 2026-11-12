@@ -26,6 +26,9 @@ export class PartnerAdminController {
   @Get('data') @Header('Cache-Control', 'no-store') @ApiBearerAuth() @UseGuards(PartnerAdminGuard)
   data() { return this.partners.getData(); }
 
+  @Get('payouts/:id/history') @Header('Cache-Control', 'no-store') @ApiBearerAuth() @UseGuards(PartnerAdminGuard)
+  history(@Param('id') id: string) { return this.partners.payoutHistory(id); }
+
   @Put('terms') @ApiBearerAuth() @UseGuards(PartnerAdminGuard)
   terms(@Req() req: PartnerAdminRequest, @Body() dto: PartnerTermsDto) { return this.partners.updateTerms(req.partnerAdmin.id, dto); }
 

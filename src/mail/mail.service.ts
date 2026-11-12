@@ -45,6 +45,22 @@ export class MailService {
 
   get configured(): boolean { return this.transporter !== null; }
 
+  async sendPartnerNotification(email: string, id: string, title: string, message: string): Promise<void> {
+    if (!this.transporter) throw new Error('SMTP is not configured');
+    const link = new URL('/partner/account/notifications', this.config.get('APP_URL', 'https://mycoo.io'));
+    if (!['http:', 'https:'].includes(link.protocol)) throw new Error('APP_URL must use HTTP or HTTPS');
+    const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+    const result = await this.transporter.sendMail({
+      from: this.config.get('MAIL_FROM', 'MyCOO <no-reply@mycoo.io>'), to: email,
+      messageId: `<partner-notification.${id}@mycoo.io>`, subject: `${title} — MyCOO`,
+      text: `${message}\n\nОткрыть кабинет: ${link.href}`,
+      html: this.renderTemplate(this.loadTemplate('notification.html'), {
+        title: escape(title), company: 'Партнёрская программа', message: escape(message), link: escape(link.href),
+      }),
+    });
+    if (!result.accepted?.length) throw new Error('Partner notification was not accepted');
+  }
+
   async sendNotification(email: string, id: string, kind: 'TASK_ASSIGNED' | 'ROLE_CHANGED' | 'MEETING_INVITED' | 'MEETING_PROTOCOL', company: string, message: string): Promise<void> {
     if (!this.transporter) throw new Error('SMTP is not configured');
     const link = new URL('/dashboard/notifications', this.config.get('APP_URL', 'https://mycoo.io'));

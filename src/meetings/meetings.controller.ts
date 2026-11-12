@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Headers,
   Param,
   Patch,
@@ -22,6 +23,7 @@ import {
   NotesDto,
   PublishProtocolDto,
   TranscriptDto,
+  RecordingShareDto,
 } from './meetings.dto.js';
 interface UserRequest extends Request {
   user: JwtPayload;
@@ -114,6 +116,21 @@ export class MeetingsController {
       p.recordingId,
     );
   }
+  @Post(':meetingId/recordings/:recordingId/share')
+  @Header('Cache-Control', 'no-store')
+  share(
+    @Req() r: UserRequest,
+    @Param() p: Params,
+    @Body() dto: RecordingShareDto,
+  ) {
+    return this.meetings.shareRecording(
+      r.user.sub,
+      p.workspaceId,
+      p.meetingId,
+      p.recordingId,
+      dto.enabled,
+    );
+  }
   @Post(':meetingId/recordings/:recordingId/retry') retry(
     @Req() r: UserRequest,
     @Param() p: Params,
@@ -124,6 +141,16 @@ export class MeetingsController {
       p.meetingId,
       p.recordingId,
     );
+  }
+}
+@Controller('meetings/recordings/shared')
+export class SharedMeetingRecordingsController {
+  constructor(private readonly meetings: MeetingsService) {}
+  @Get(':token')
+  @Header('Cache-Control', 'no-store')
+  @Header('Referrer-Policy', 'no-referrer')
+  get(@Param('token') token: string) {
+    return this.meetings.sharedRecording(token);
   }
 }
 @Controller('meetings/events')

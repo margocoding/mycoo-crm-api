@@ -147,6 +147,7 @@ try {
     await call(`/partner-admin/payouts/${payoutId}/pay`, { token: adminToken, body: { amount: 5500, date: new Date().toISOString(), idempotencyKey: randomUUID() }, status: 409 });
     await call(`/partner-admin/payouts/${payoutId}/review`, { token: adminToken, body: { status: 'review' } });
     await call(`/partner-admin/payouts/${payoutId}/review`, { token: adminToken, body: { status: 'approved' } });
+    await call(`/partner-admin/payouts/${payoutId}/review`, { token: adminToken, body: { status: 'approved' } });
     const pay = { amount: 5500, date: new Date().toISOString(), idempotencyKey: randomUUID() };
     await call(`/partner-admin/payouts/${payoutId}/pay`, { token: adminToken, body: pay });
     await call(`/partner-admin/payouts/${payoutId}/pay`, { token: adminToken, body: pay });
@@ -252,6 +253,53 @@ try {
     await assert.rejects(prisma.partnerLedgerEntry.update({ where: { id: entry.id }, data: { amountKopecks: 1 } }));
     await assert.rejects(prisma.partnerLedgerEntry.delete({ where: { id: entry.id } }));
     assert((await prisma.partnerPayoutEvent.count({ where: { payoutId } })) >= 4);
+  });
+  await check('payout notifications are atomic, private and not duplicated by operation retries', async () => {
+    assert.equal(await prisma.workspace.count({ where: { ownerId: partner.user.id } }), 0);
+    const notices = await call('/partners/me/notifications', { token: partner.accessToken });
+    assert.equal(notices.items.length, 3);
+    assert.equal(notices.unreadCount, 3);
+    assert(notices.items.some(item => item.title.includes('принята')));
+    assert(notices.items.some(item => item.title.includes('одобрена')));
+    assert(notices.items.some(item => item.title.includes('выплачено')));
+    assert.equal(await prisma.partnerNotification.count({ where: { event: { payoutId } } }), 3);
+    assert(notices.items.every(item => !('emailLease' in item) && !('partnerId' in item)));
+    const foreign = (await call('/partners/me/notifications', { token: maturePartner.accessToken })).items[0];
+    await call(`/partners/me/notifications/${foreign.id}/read`, { token: partner.accessToken, body: {}, status: 404 });
+    await call(`/partners/me/notifications?cursor=${foreign.id}`, { token: partner.accessToken, status: 400 });
+    await call(`/partners/me/notifications/${notices.items[0].id}/read`, { token: partner.accessToken, body: {} });
+    assert.equal((await call('/partners/me/notifications', { token: partner.accessToken })).unreadCount, 2);
+    await call('/partners/me/notifications/read-all', { token: partner.accessToken, body: {} });
+    await call('/partners/me/notifications/read-all', { token: partner.accessToken, body: {} });
+    assert.equal((await call('/partners/me/notifications', { token: partner.accessToken })).unreadCount, 0);
+    const rejected = await prisma.partnerNotification.findFirst({ where: { event: { status: 'rejected' }, partner: { userId: maturePartner.user.id } } });
+    assert(rejected?.message.includes('Партнёр запросил другую сумму'));
+  });
+  await check('administrator history exposes actor, time and reason but is inaccessible to a partner', async () => {
+    await call(`/partner-admin/payouts/${payoutId}/history`, { token: partner.accessToken, status: 401 });
+    const history = await call(`/partner-admin/payouts/${payoutId}/history`, { token: adminToken });
+    assert.deepEqual(history.items.map(item => item.status), ['new', 'review', 'approved', 'paid']);
+    assert(history.items.every(item => item.note && item.createdAt && item.actor));
+    assert(history.items[1].actor.includes(adminLogin));
+    const adminData = await call('/partner-admin/data', { token: adminToken });
+    assert(adminData.ledger.every(item => item.actor));
+    assert((await call('/partners/me', { token: partner.accessToken })).ledger.every(item => !('actor' in item)));
+  });
+  await check('complete partner ledger paginates equal-time entries and rejects foreign cursors', async () => {
+    const sameTime = new Date();
+    await prisma.partnerLedgerEntry.createMany({ data: Array.from({ length: 24 }, (_, index) => ({
+      partnerId, kind: 'adjustment', amountKopecks: 1, availableAt: sameTime, createdAt: sameTime,
+      description: `Корректировка без клиента ${index}`, actorId: 'integration', operationKey: `history-${tag}-${index}`,
+    })) });
+    const first = await call('/partners/me/ledger', { token: partner.accessToken });
+    assert.equal(first.items.length, 20); assert(first.nextCursor);
+    const second = await call(`/partners/me/ledger?cursor=${first.nextCursor}`, { token: partner.accessToken });
+    const ids = [...first.items, ...second.items].map(item => item.id);
+    assert.equal(new Set(ids).size, ids.length);
+    assert.equal(ids.length, await prisma.partnerLedgerEntry.count({ where: { partnerId } }));
+    assert.equal(second.nextCursor, null);
+    const foreign = await prisma.partnerLedgerEntry.findFirstOrThrow({ where: { partner: { userId: maturePartner.user.id } } });
+    await call(`/partners/me/ledger?cursor=${foreign.id}`, { token: partner.accessToken, status: 400 });
   });
   await check('credential rotation revokes all old sessions and logout revokes new one', async () => {
     const second = await call('/partner-admin/login', { body: { login: adminLogin, password } });

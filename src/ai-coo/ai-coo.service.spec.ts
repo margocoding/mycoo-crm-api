@@ -7,6 +7,7 @@ import type { GigachatService } from '../gigachat/gigachat.service.js';
 import type { AiCooContext, AiCooContextService } from './ai-coo-context.service.js';
 import { COO_FILE_SIZE, validateCooFile } from './ai-coo-files.js';
 import { AiCooService, cooHistory } from './ai-coo.service.js';
+import type { AiCooLinksService } from './ai-coo-links.service.js';
 
 const now = new Date('2026-10-27T08:00:00Z');
 const requestId = '6305dcb3-cba7-4df2-a114-336b31d371ab';
@@ -101,15 +102,26 @@ function fixture() {
     },
     $transaction: vi.fn(async (action: (db: any) => unknown) => action(prisma)),
   };
+  const links = { collect: vi.fn(async () => ({ sources: [], omitted: 0 })) };
   const service = new AiCooService(prisma as PrismaService, context as unknown as AiCooContextService,
-    provider as unknown as GigachatService);
-  return { service, prisma, provider, context, access, conversations, turns, documents };
+    provider as unknown as GigachatService, links as unknown as AiCooLinksService);
+  return { service, prisma, provider, context, access, conversations, turns, documents, links };
 }
 
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(now); });
 afterEach(() => { vi.useRealTimers(); });
 
 describe('AI COO persisted conversation', () => {
+  it('passes fetched page text as untrusted context but only persists source metadata', async () => {
+    const f = fixture();
+    f.links.collect.mockResolvedValueOnce({ sources: [{ type: 'url', url: 'https://example.com/report', title: 'Отчёт', status: 'read', text: 'Private page body should not be duplicated in stored metadata', truncated: true }] as any, omitted: 1 });
+    const state = await f.service.send('alice', 'company', { text: 'Посмотри https://example.com/report', requestId });
+    expect((f.provider.chatCoo.mock.calls as any)[0][0].context.webSources[0].text).toContain('Private page body');
+    expect(state.messages.at(-1)).toMatchObject({ sources: [{ url: 'https://example.com/report', title: 'Отчёт', status: 'read', truncated: true }] });
+    expect(JSON.stringify(f.turns[0].documents)).not.toContain('Private page body');
+    expect(state.messages[0]).toMatchObject({ role: 'user', documents: [] });
+  });
+
   it('isolates messages and documents by user, company and current permission scope', async () => {
     const f = fixture();
     const bobDocument = await f.service.upload('bob', 'company', 'a', pdf());

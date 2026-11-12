@@ -18,6 +18,8 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MeetingsWorker.name);
   private queue?: Queue;
   private worker?: Worker;
+  private backgroundQueue?: Queue;
+  private backgroundWorker?: Worker;
   private producer?: Redis;
   private consumer?: Redis;
   private closing = false;
@@ -56,6 +58,29 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
     this.worker.on('failed', () =>
       this.logger.warn('Meeting processing failed; persisted work retained'),
     );
+    // Recognition can take minutes. It must not hold up stop/start or access revocation.
+    this.backgroundQueue = new Queue('meetings-background', {
+      connection: this.producer,
+    });
+    this.backgroundQueue.on('error', () =>
+      this.logger.warn('Meetings background queue unavailable'),
+    );
+    this.backgroundWorker = new Worker(
+      'meetings-background',
+      (job) =>
+        job.name === 'recording'
+          ? this.recording(job.data.id as string)
+          : this.analyze(job.data.id as string),
+      { connection: this.consumer, concurrency: 2 },
+    );
+    this.backgroundWorker.on('error', () =>
+      this.logger.warn('Meetings background worker unavailable'),
+    );
+    this.backgroundWorker.on('failed', () =>
+      this.logger.warn(
+        'Meeting background work will retry from persisted state',
+      ),
+    );
     const schedule = () =>
       this.queue!.upsertJobScheduler(
         'scan',
@@ -81,9 +106,10 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
     const now = new Date();
     // These DB leases also protect scans running in several API instances.
     if (this.calls.configured) {
+      await this.revokeRemovedParticipants();
       const recordings = await this.prisma.meetingRecording.findMany({
         where: {
-          status: { in: ['starting', 'recording', 'stopping', 'transcribing'] },
+          status: { in: ['starting', 'recording', 'stopping'] },
           nextAttemptAt: { lte: now },
           OR: [{ processingUntil: null }, { processingUntil: { lt: now } }],
         },
@@ -91,6 +117,26 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
         orderBy: { nextAttemptAt: 'asc' },
       });
       for (const row of recordings) await this.recording(row.id);
+      const recognizing = await this.prisma.meetingRecording.findMany({
+        where: {
+          status: 'transcribing',
+          nextAttemptAt: { lte: now },
+          meeting: { workspace: { deletedAt: null } },
+          OR: [{ processingUntil: null }, { processingUntil: { lt: now } }],
+        },
+        take: 20,
+        orderBy: { nextAttemptAt: 'asc' },
+      });
+      for (const row of recognizing)
+        await this.backgroundQueue?.add(
+          'recording',
+          { id: row.id },
+          {
+            jobId: 'recording-' + row.id,
+            removeOnComplete: true,
+            removeOnFail: true,
+          },
+        );
       const ended = await this.prisma.meeting.findMany({
         where: {
           status: { in: ['completed', 'cancelled'] },
@@ -115,6 +161,7 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
         where: {
           ...(completedCursor ? { id: { gt: completedCursor } } : {}),
           status: 'completed',
+          workspace: { deletedAt: null },
           transcriptSource: 'recording',
           publishedAt: null,
           recordings: {
@@ -135,11 +182,21 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
         analysisStatus: { in: ['queued', 'processing'] },
         OR: [{ processingUntil: null }, { processingUntil: { lt: now } }],
         publishedAt: null,
+        workspace: { deletedAt: null },
       },
       take: 5,
       orderBy: { updatedAt: 'asc' },
     });
-    for (const m of pending) await this.analyze(m.id);
+    for (const m of pending)
+      await this.backgroundQueue?.add(
+        'analysis',
+        { id: m.id },
+        {
+          jobId: 'analysis-' + m.id,
+          removeOnComplete: true,
+          removeOnFail: true,
+        },
+      );
   }
 
   async recording(id: string) {
@@ -157,10 +214,14 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
     if (!claimed.count) return;
     const row = await this.prisma.meetingRecording.findUniqueOrThrow({
       where: { id },
-      include: { meeting: true },
+      include: {
+        meeting: { include: { workspace: { select: { deletedAt: true } } } },
+      },
     });
     try {
       const room = row.meeting.roomName;
+      if (row.meeting.workspace?.deletedAt && row.status === 'transcribing')
+        return;
       if (row.status === 'starting' && row.meeting.status !== 'live') {
         await this.prisma.meetingRecording.update({
           where: { id },
@@ -179,6 +240,7 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
           room,
           '/recordings',
           'POST',
+          { recordingId: row.id },
         );
         await this.prisma.meetingRecording.update({
           where: { id },
@@ -186,19 +248,36 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
         });
         await this.prisma.meetingRecording.updateMany({
           where: { id, status: 'starting' },
-          data: { status: 'recording' },
+          data: { status: result.status === 0 ? 'starting' : 'recording' },
         });
+        row.egressId = result.id;
         recordings = [result];
+      }
+      if (row.status === 'stopping' && !row.egressId) {
+        row.egressId =
+          recordings.find((entry) => entry.recordingId === row.id)?.id ?? null;
+        if (!row.egressId) {
+          await this.prisma.meetingRecording.update({
+            where: { id },
+            data: { status: 'failed', error: 'Запись остановлена до начала.' },
+          });
+          return;
+        }
+        await this.prisma.meetingRecording.update({
+          where: { id },
+          data: { egressId: row.egressId },
+        });
       }
       if (row.status === 'stopping')
         recordings = await this.calls.request<CallRecording[]>(
           room,
           '/recordings/stop',
           'POST',
+          { egressId: row.egressId },
         );
       const egress = row.egressId
         ? recordings.find((e) => e.id === row.egressId)
-        : recordings.at(-1);
+        : recordings.find((entry) => entry.recordingId === row.id);
       if (!egress && !row.fileKey && row.status !== 'starting')
         throw new Error('Recording was not found');
       if (egress && !row.egressId)
@@ -211,11 +290,38 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
       const key =
         row.fileKey ||
         (egress?.status === 3 ? egress.files?.[0]?.filename : undefined);
+      if (egress?.status === 3 && !key)
+        throw new Error('Completed recording has no output file');
+      if (egress?.status === 2 && row.status !== 'stopping') {
+        await this.prisma.meetingRecording.updateMany({
+          where: { id, status: { in: ['starting', 'recording'] } },
+          data: { status: 'stopping', stopRequestedAt: new Date() },
+        });
+        return;
+      }
+      if (
+        row.status === 'stopping' &&
+        !key &&
+        row.stopRequestedAt &&
+        Date.now() - row.stopRequestedAt.getTime() > 5 * 60_000
+      ) {
+        await this.prisma.meetingRecording.update({
+          where: { id },
+          data: {
+            status: 'failed',
+            error:
+              'Сохранение записи затянулось. Повторите обработку; новый фрагмент можно начать после завершения предыдущего.',
+          },
+        });
+        return;
+      }
       if (key) {
         await this.prisma.meetingRecording.update({
           where: { id },
           data: { fileKey: key, status: 'transcribing' },
         });
+        if (row.status !== 'transcribing' || row.meeting.workspace?.deletedAt)
+          return;
         const result = await this.calls.request<{
           uploadId?: string;
           taskId?: string;
@@ -267,12 +373,65 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  async revokeRemovedParticipants() {
+    let cursor: string | undefined;
+    while (!this.closing) {
+      const meetings = await this.prisma.meeting.findMany({
+        where: {
+          status: 'live',
+          roomClosed: false,
+          ...(cursor ? { id: { gt: cursor } } : {}),
+          OR: [
+            { participants: { some: { removed: true } } },
+            { guests: { some: { removed: true } } },
+          ],
+        },
+        select: {
+          id: true,
+          roomName: true,
+          participants: { where: { removed: true }, select: { userId: true } },
+          guests: { where: { removed: true }, select: { id: true } },
+        },
+        take: 50,
+        orderBy: { id: 'asc' },
+      });
+      for (const meeting of meetings) {
+        try {
+          const connected = await this.calls.request<{ identity: string }[]>(
+            meeting.roomName,
+            '/participants',
+          );
+          const revoked = new Set([
+            ...meeting.participants.map((p) => p.userId),
+            ...meeting.guests.map((p) => p.id),
+          ]);
+          for (const person of connected)
+            if (revoked.has(person.identity))
+              await this.calls.request(
+                meeting.roomName,
+                '/participant',
+                'POST',
+                {
+                  identity: person.identity,
+                  action: 'remove',
+                  screenShare: false,
+                },
+              );
+        } catch {
+          this.logger.warn('Meeting participant removal will retry');
+        }
+      }
+      if (meetings.length < 50) break;
+      cursor = meetings.at(-1)!.id;
+    }
+  }
+
   private async queueTranscript(id: string) {
     const scope = await this.prisma.meeting.findUnique({
       where: { id },
-      select: { workspaceId: true },
+      select: { workspaceId: true, workspace: { select: { deletedAt: true } } },
     });
-    if (!scope) return;
+    if (!scope || scope.workspace?.deletedAt) return;
     await this.prisma.$transaction(async (tx) => {
       await tx.$executeRawUnsafe(
         'SELECT pg_advisory_xact_lock(hashtext($1))',
@@ -280,9 +439,13 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
       );
       const m = await tx.meeting.findUniqueOrThrow({
         where: { id },
-        include: { recordings: { orderBy: { createdAt: 'asc' } } },
+        include: {
+          recordings: { orderBy: { createdAt: 'asc' } },
+          workspace: { select: { deletedAt: true } },
+        },
       });
       if (
+        m.workspace?.deletedAt ||
         m.publishedAt ||
         m.transcriptSource === 'manual' ||
         m.status !== 'completed' ||
@@ -323,6 +486,7 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
     const claim = await this.prisma.meeting.updateMany({
       where: {
         id,
+        workspace: { deletedAt: null },
         publishedAt: null,
         analysisStatus: { in: ['queued', 'processing'] },
         OR: [{ processingUntil: null }, { processingUntil: { lt: now } }],
@@ -332,15 +496,20 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
     if (!claim.count) return;
     const m = await this.prisma.meeting.findUniqueOrThrow({
       where: { id },
-      include: { department: true, workspace: { select: { ownerId: true } } },
+      include: {
+        department: true,
+        workspace: { select: { ownerId: true, deletedAt: true } },
+      },
     });
     const where = {
       id,
+      workspace: { deletedAt: null },
       analysisRevision: m.analysisRevision,
       publishedAt: null,
       processingUntil: lease,
     };
     try {
+      if (m.workspace.deletedAt) return;
       const active = await this.prisma.subscription.count({
         where: { userId: m.workspace.ownerId, activeUntil: { gt: new Date() } },
       });
@@ -431,6 +600,8 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
   async onModuleDestroy() {
     this.closing = true;
     await this.worker?.close();
+    await this.backgroundWorker?.close();
+    await this.backgroundQueue?.close();
     await this.queue?.close();
     this.producer?.disconnect();
     this.consumer?.disconnect();

@@ -235,6 +235,13 @@ export class AuthService {
     });
   }
 
+  async confirmOAuthEmail(email: string, code: string) {
+    const existing = await this.prisma.user.findUnique({ where: { email }, select: { id: true } });
+    const hash = await this.verifyConfirmationCode(email, code, existing ? 'login' : 'register');
+    if (!await this.redis.consumeCode(AUTH_REDIS_KEYS.code(email), hash))
+      throw new BadRequestException('Код уже использован. Запросите новый.');
+  }
+
   private generateCode(): string {
     if (this.isDevelopment) {
       return "111111";

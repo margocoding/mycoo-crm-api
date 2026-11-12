@@ -7,6 +7,7 @@ import { GigachatModule } from '../gigachat/gigachat.module.js';
 import {
   MeetingsController,
   MeetingEventsController,
+  SharedMeetingRecordingsController,
 } from './meetings.controller.js';
 import { MeetingsService } from './meetings.service.js';
 import { CallsClient } from './calls.client.js';
@@ -24,6 +25,7 @@ import { GuestMeetingsService } from './guest-meetings.service.js';
   controllers: [
     MeetingsController,
     MeetingEventsController,
+    SharedMeetingRecordingsController,
     GuestMeetingsController,
   ],
   providers: [

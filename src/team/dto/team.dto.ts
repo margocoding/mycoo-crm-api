@@ -3,7 +3,7 @@ import {
   ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsEmail, IsEnum,
   IsOptional, IsString, Length, MaxLength,
 } from 'class-validator';
-import { PickType } from '@nestjs/swagger';
+import { PartialType, PickType } from '@nestjs/swagger';
 import { DepartmentRole } from '../../../generated/prisma/enums.js';
 import { RegisterUserDto } from '../../auth/dto/register-user.dto.js';
 
@@ -49,4 +49,4 @@ export class InvitationDto extends MemberRoleDto {
   name?: string;
 }
 
-export class AcceptInvitationDto extends PickType(RegisterUserDto, ['password'] as const) {}
+export class AcceptInvitationDto extends PartialType(PickType(RegisterUserDto, ['password'] as const)) {}

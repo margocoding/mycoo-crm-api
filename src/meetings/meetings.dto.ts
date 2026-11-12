@@ -75,6 +75,9 @@ export class MeetingActionDto {
 export class TranscriptDto {
   @IsString() @Length(1, 250000) text!: string;
 }
+export class RecordingShareDto {
+  @IsBoolean() enabled!: boolean;
+}
 export class GuestMeetingJoinDto {
   @IsString() @Length(1, 80) name!: string;
   @IsUUID('4') guestKey!: string;

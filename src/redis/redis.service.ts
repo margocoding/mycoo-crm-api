@@ -53,6 +53,15 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     await this.client.del(key);
   }
 
+  async takeJson<T>(key: string): Promise<T | null> {
+    const raw = await this.client.eval("local v = redis.call('GET', KEYS[1]); if v then redis.call('DEL', KEYS[1]) end; return v", 1, key);
+    return typeof raw === 'string' ? JSON.parse(raw) as T : null;
+  }
+
+  async consumeCode(key: string, codeHash: string): Promise<boolean> {
+    return Number(await this.client.eval("local v = redis.call('GET', KEYS[1]); if not v then return 0 end; if cjson.decode(v).codeHash ~= ARGV[1] then return 0 end; return redis.call('DEL', KEYS[1])", 1, key, codeHash)) === 1;
+  }
+
   async ttl(key: string): Promise<number> {
     return this.client.ttl(key);
   }

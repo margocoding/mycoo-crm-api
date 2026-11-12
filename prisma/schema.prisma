@@ -40,6 +40,7 @@ model User {
   partner             Partner?
   partnerReferral     PartnerReferral?
   aiCooConversations  AiCooConversation[]
+  identities          OAuthIdentity[]
 
   @@map("users")
 }
@@ -84,6 +85,7 @@ model Workspace {
   createdAt      DateTime  @default(now()) @map("created_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")
   trialStartedAt DateTime? @map("trial_started_at")
+  deletedAt      DateTime? @map("deleted_at")
 
   members            WorkspaceMember[]
   diagnosticsAnswers DiagnosticsAnswer[]
@@ -95,6 +97,18 @@ model Workspace {
   aiCooConversations AiCooConversation[]
 
   @@map("workspaces")
+}
+
+model OAuthIdentity {
+  id        String @id @default(cuid())
+  provider  String
+  subject   String
+  userId    String @map("user_id")
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
+  @@unique([provider, subject])
+  @@unique([provider, userId])
+  @@map("oauth_identities")
 }
 
 model WorkspaceMember {
@@ -226,6 +240,7 @@ model Partner {
   referrals     PartnerReferral[]
   ledger        PartnerLedgerEntry[]
   payouts       PartnerPayout[]
+  notifications PartnerNotification[]
   @@map("partners")
 }
 
@@ -307,8 +322,30 @@ model PartnerPayoutEvent {
   actorId       String   @map("actor_id")
   amountKopecks Int?     @map("amount_kopecks")
   createdAt     DateTime @default(now()) @map("created_at")
+  notification  PartnerNotification?
   @@index([payoutId, createdAt])
   @@map("partner_payout_events")
+}
+
+model PartnerNotification {
+  id             String   @id @default(cuid())
+  partnerId      String   @map("partner_id")
+  partner        Partner  @relation(fields: [partnerId], references: [id], onDelete: Restrict)
+  eventId        String   @unique @map("event_id")
+  event          PartnerPayoutEvent @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  title          String
+  message        String
+  readAt         DateTime? @map("read_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  emailSentAt    DateTime? @map("email_sent_at")
+  emailAttempts  Int @default(0) @map("email_attempts")
+  emailNextAt    DateTime @default(now()) @map("email_next_at")
+  emailLease     String? @map("email_lease")
+  emailLeaseUntil DateTime? @map("email_lease_until")
+  @@index([partnerId, createdAt, id])
+  @@index([partnerId, readAt])
+  @@index([emailSentAt, emailNextAt])
+  @@map("partner_notifications")
 }
 
 model PartnerTerms {
@@ -611,6 +648,9 @@ model MeetingRecording {
   speechTaskId String? @map("speech_task_id")
   transcript String?
   error String?
+  stopRequestedAt DateTime? @map("stop_requested_at")
+  shareTokenHash String? @unique @map("share_token_hash")
+  shareExpiresAt DateTime? @map("share_expires_at")
   processingUntil DateTime? @map("processing_until")
   nextAttemptAt DateTime @default(now()) @map("next_attempt_at")
   attempts Int @default(0)

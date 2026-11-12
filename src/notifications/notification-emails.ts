@@ -73,7 +73,7 @@ export class NotificationEmails implements OnModuleInit, OnModuleDestroy {
 
   async deliver(id: string) {
     const item = await this.prisma.notification.findUnique({ where: { id }, include: {
-      recipient: { select: { email: true } }, workspace: { select: { company: true, ownerId: true,
+      recipient: { select: { email: true } }, workspace: { select: { company: true, ownerId: true, deletedAt: true,
         members: { select: { userId: true } } } },
       task: { select: { assignees: { select: { userId: true } } } },
     } });
@@ -86,7 +86,7 @@ export class NotificationEmails implements OnModuleInit, OnModuleDestroy {
       : item.departmentId && await this.prisma.departmentMember.findUnique({
         where: { departmentId_userId: { departmentId: item.departmentId, userId: item.recipientId } }, select: { userId: true },
       });
-    if (!member || !relevant) {
+    if (item.workspace.deletedAt || !member || !relevant) {
       await this.prisma.notification.updateMany({ where: { id, emailStatus: 'PENDING' }, data: { emailStatus: 'SKIPPED' } });
       return;
     }

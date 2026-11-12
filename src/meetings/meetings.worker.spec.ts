@@ -76,6 +76,102 @@ function fixture(status = 'completed') {
   return { meeting, recording, db, calls, make };
 }
 describe('Meeting processing recovery', () => {
+  it('saves a stopped fragment before recognition so the scan can start the next one', async () => {
+    const f = fixture('live');
+    Object.assign(f.recording, {
+      status: 'stopping',
+      fileKey: null,
+      egressId: 'EG_one',
+      stopRequestedAt: new Date(),
+    });
+    const completed = [
+      {
+        id: 'EG_one',
+        status: 3,
+        files: [{ filename: 'meetings/meeting_one/segment_r1.mp4' }],
+      },
+    ];
+    f.calls.request.mockResolvedValue(completed);
+    await f.make().recording('r1');
+    expect(f.recording.status).toBe('transcribing');
+    expect(f.calls.request).toHaveBeenCalledWith(
+      'meeting_one',
+      '/recordings/stop',
+      'POST',
+      { egressId: 'EG_one' },
+    );
+    expect(
+      f.calls.request.mock.calls.some(
+        (call) => call[1] === '/recordings/transcribe',
+      ),
+    ).toBe(false);
+  });
+  it('does not attach a stopped-before-start fragment to another recording', async () => {
+    const f = fixture('live');
+    Object.assign(f.recording, {
+      status: 'stopping',
+      fileKey: null,
+      egressId: null,
+      stopRequestedAt: new Date(),
+    });
+    f.calls.request.mockResolvedValue([
+      { id: 'EG_other', status: 3, files: [{ filename: 'other.mp4' }] },
+    ]);
+    await f.make().recording('r1');
+    expect(f.recording.status).toBe('failed');
+    expect(f.recording.fileKey).toBeNull();
+    expect(f.calls.request).toHaveBeenCalledTimes(1);
+  });
+  it('bounds a stuck stopping state and keeps its Egress ID for recovery', async () => {
+    const f = fixture('live');
+    Object.assign(f.recording, {
+      status: 'stopping',
+      fileKey: null,
+      egressId: 'EG_one',
+      stopRequestedAt: new Date(Date.now() - 6 * 60_000),
+    });
+    f.calls.request.mockResolvedValue([{ id: 'EG_one', status: 2, files: [] }]);
+    await f.make().recording('r1');
+    expect(f.recording.status).toBe('failed');
+    expect(f.recording.egressId).toBe('EG_one');
+    expect(f.recording.error).toContain('Сохранение записи затянулось');
+  });
+  it('does not claim capture forever when completed Egress has no file', async () => {
+    const f = fixture('live');
+    Object.assign(f.recording, {
+      status: 'recording',
+      fileKey: null,
+      egressId: 'EG_one',
+      attempts: 5,
+    });
+    f.calls.request.mockResolvedValue([{ id: 'EG_one', status: 3, files: [] }]);
+    await f.make().recording('r1');
+    expect(f.recording.status).toBe('failed');
+    expect(f.recording.fileKey).toBeNull();
+  });
+  it('disconnects removed members that are actually in the room, retaining everyone else', async () => {
+    const f = fixture('live');
+    f.db.meeting.findMany.mockResolvedValue([
+      {
+        id: 'm1',
+        roomName: 'meeting_one',
+        participants: [{ userId: 'removed' }],
+        guests: [],
+      },
+    ]);
+    f.calls.request.mockResolvedValue([
+      { identity: 'removed' },
+      { identity: 'active' },
+    ]);
+    await f.make().revokeRemovedParticipants();
+    expect(f.calls.request).toHaveBeenCalledWith(
+      'meeting_one',
+      '/participant',
+      'POST',
+      { identity: 'removed', action: 'remove', screenShare: false },
+    );
+    expect(f.calls.request).toHaveBeenCalledTimes(2);
+  });
   it('resumes upload, task and result across worker instances without needing Egress again', async () => {
     const f = fixture();
     f.calls.request

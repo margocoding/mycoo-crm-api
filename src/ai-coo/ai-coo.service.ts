@@ -7,11 +7,17 @@ import type { CooMessage } from '../gigachat/coo.types.js';
 import { AiCooContextService, type AiCooContext } from './ai-coo-context.service.js';
 import { AiCooMessageDto } from './ai-coo.dto.js';
 import { COO_FILE_COUNT, type CooUpload, validateCooFile } from './ai-coo-files.js';
+import { AiCooLinksService } from './ai-coo-links.service.js';
 
 type DocumentLabel = { id: string; name: string };
 const labels = (value: Prisma.JsonValue): DocumentLabel[] => Array.isArray(value)
   ? value.flatMap(item => item && typeof item === 'object' && !Array.isArray(item)
     && typeof item.id === 'string' && typeof item.name === 'string' ? [{ id: item.id, name: item.name }] : []) : [];
+const sourceLabels = (value: Prisma.JsonValue) => Array.isArray(value) ? value.flatMap(item => item && typeof item === 'object'
+  && !Array.isArray(item) && item.type === 'url' && typeof item.url === 'string'
+  && (item.status === 'read' || item.status === 'unavailable') ? [{ url: item.url,
+    title: typeof item.title === 'string' ? item.title : '', status: item.status,
+    ...(typeof item.error === 'string' ? { error: item.error } : {}), truncated: item.truncated === true }] : []) : [];
 
 export function cooHistory(turns: AiCooTurn[], documents: AiCooDocument[]): CooMessage[] {
   const selected: CooMessage[][] = [];
@@ -42,7 +48,7 @@ export class AiCooService {
   private readonly logger = new Logger(AiCooService.name);
 
   constructor(private readonly prisma: PrismaService, private readonly context: AiCooContextService,
-    private readonly gigachat: GigachatService) {}
+    private readonly gigachat: GigachatService, private readonly links: AiCooLinksService) {}
 
   private async conversation(userId: string, workspaceId: string, departmentId?: string) {
     const context = await this.context.build(userId, workspaceId, departmentId);
@@ -72,6 +78,7 @@ export class AiCooService {
       return turn.status === 'complete' && turn.answer ? [user, {
         id: turn.id + ':assistant', role: 'assistant' as const, content: turn.answer,
         createdAt: (turn.completedAt ?? turn.createdAt).toISOString(), status: 'complete',
+        sources: sourceLabels(turn.documents),
       }] : [user];
     });
     return { conversation: { id: conversation.id }, scope: context.scope, scopes: context.scopes,
@@ -154,8 +161,13 @@ export class AiCooService {
         });
       });
       turnId = turn.id;
+      const web = await this.links.collect(text);
+      const sourceMetadata = web.sources.map(({ text: _text, ...source }) => source);
+      if (sourceMetadata.length) await this.withLease(id, token, tx => tx.aiCooTurn.update({ where: { id: turn.id },
+        data: { documents: [...documentLabels, ...sourceMetadata] as Prisma.InputJsonValue } }));
       const response = await this.gigachat.chatCoo({ clientId: id,
-        context: { ...context.prompt, documents: documentLabels.map(doc => ({ name: doc.name })) },
+        context: { ...context.prompt, documents: documentLabels.map(doc => ({ name: doc.name })),
+          ...(web.sources.length ? { webSources: web.sources, omittedLinks: web.omitted } : {}) },
         messages: [...cooHistory(history, documents), { role: 'user', content: text,
           ...(documents.length ? { attachments: documents.map(doc => doc.providerFileId) } : {}) }],
       });

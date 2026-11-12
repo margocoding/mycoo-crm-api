@@ -12,6 +12,7 @@ import { MailService } from '../mail/mail.service.js';
 import { RedisService } from '../redis/redis.service.js';
 import type { DepartmentDto, InvitationDto } from './dto/team.dto.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
+import { assertSingleWorkspace, lockMembership } from '../workspace/workspace-membership.js';
 
 const invitationSelect = {
   id: true, email: true, name: true, role: true, departmentId: true,
@@ -31,9 +32,9 @@ export class TeamService {
 
   private async workspace(db: Prisma.TransactionClient, userId: string, id: string) {
     const workspace = await db.workspace.findFirst({
-      where: { id, OR: [{ ownerId: userId }, { members: { some: { userId } } }] },
+      where: { id, deletedAt: null, OR: [{ ownerId: userId }, { members: { some: { userId } } }] },
     });
-    if (!workspace) throw new NotFoundException('Компания не найдена.');
+    if (!workspace) throw new NotFoundException({ code: 'WORKSPACE_UNAVAILABLE', message: 'Компания удалена или доступ к ней прекращён.' });
     return workspace;
   }
 
@@ -327,7 +328,7 @@ export class TeamService {
     if (invitation.acceptedAt || invitation.revokedAt || invitation.expiresAt <= new Date())
       throw new GoneException('Приглашение использовано, отменено или срок ссылки истёк. Попросите новую ссылку.');
     const { workspace } = invitation.department;
-    if (!workspace.isActive || !workspace.diagnosticsComplete) throw new GoneException('Компания сейчас недоступна.');
+    if (workspace.deletedAt || !workspace.isActive || !workspace.diagnosticsComplete) throw new GoneException('Компания сейчас недоступна.');
     try {
       const access = await this.access(db, invitation.invitedById, workspace.id, invitation.departmentId);
       if (invitation.role === DepartmentRole.CHIEF && !access.canAssignChief) throw new ForbiddenException();
@@ -351,15 +352,18 @@ export class TeamService {
     };
   }
 
-  async accept(token: string, password: string) {
+  async accept(token: string, password?: string, authenticatedUserId?: string) {
     const initial = await this.activeInvitation(this.prisma, token);
     const existing = await this.prisma.user.findUnique({ where: { email: initial.email } });
     const attemptKey = 'team:password:' + this.tokenHash(initial.email);
-    if (existing && await this.redis.countAttempt(attemptKey, 900) > 5)
+    if (existing && !authenticatedUserId && await this.redis.countAttempt(attemptKey, 900) > 5)
       throw new HttpException('Слишком много попыток. Повторите через 15 минут.', 429);
-    if (existing && !await this.auth.comparePassword(password, existing.passwordHash))
+    if (authenticatedUserId && existing?.id !== authenticatedUserId)
+      throw new ForbiddenException('Приглашение адресовано другому аккаунту. Войдите с указанной в приглашении почтой.');
+    if (existing && !authenticatedUserId && (!password || !await this.auth.comparePassword(password, existing.passwordHash)))
       throw new BadRequestException('Введите действующий пароль этого аккаунта.');
-    const passwordHash = existing ? null : await this.auth.hashPassword(password);
+    if (!existing && !password) throw new BadRequestException('Задайте пароль для нового аккаунта.');
+    const passwordHash = existing ? null : await this.auth.hashPassword(password!);
     const workspaceId = initial.department.workspaceId;
     const user = await this.transaction(workspaceId, async (tx) => {
       await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', 'invite-email:' + initial.email);
@@ -371,6 +375,8 @@ export class TeamService {
       const member = current ?? await tx.user.create({
         data: { email: invitation.email, name: invitation.name, passwordHash: passwordHash! },
       });
+      await lockMembership(tx, member.id);
+      await assertSingleWorkspace(tx, member.id, workspaceId);
       if (await tx.departmentMember.findUnique({
         where: { departmentId_userId: { departmentId: invitation.departmentId, userId: member.id } },
       })) throw new ConflictException('Вы уже состоите в этом департаменте.');
@@ -389,6 +395,13 @@ export class TeamService {
       });
       await this.notifications.bindPending(tx, invitation.email, member.id, member.name || invitation.name, [invitation.departmentId]);
       return member;
+    }).catch(async error => {
+      if (existing && error instanceof ConflictException) {
+        const body = error.getResponse();
+        if (typeof body === 'object' && 'code' in body && body.code === 'WORKSPACE_MEMBERSHIP_CONFLICT')
+          throw new ConflictException({ ...body, auth: await this.auth.buildAuthRdo(existing) });
+      }
+      throw error;
     });
     await this.redis.delete(attemptKey);
     return { ...await this.auth.buildAuthRdo(user), workspaceId, departmentId: initial.departmentId };

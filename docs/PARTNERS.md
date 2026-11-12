@@ -40,7 +40,14 @@
 
 ## API
 
+События новых заявок, одобрения, отказа и оплаты создают личное уведомление и email-outbox в той же транзакции. Уведомления доступны в `/partner/account/notifications` без компании и подписки. Существующие события до миграции не рассылаются задним числом. Для отправки используется прежняя SMTP-конфигурация и очередь `partner-notification-emails` в Redis; при недоступности SMTP записи сохраняются в БД и повторяются с увеличением задержки до часа. Перезапуск или потеря очереди не теряют ожидающие письма. Событие уникально, повтор операции не создаёт новое уведомление. DB-lease исключает параллельную отправку; SMTP Message-ID постоянный. Как у любой SMTP-доставки, при аварии между приёмом письма сервером и сохранением результата возможна повторная попытка с тем же Message-ID.
+
+Полный журнал партнёра доступен в `/partner/account/ledger` с курсорной пагинацией по 20 записей, включая корректировки без привязки к клиенту. В админке у заявки доступна история статусов с автором, временем и причиной; у финансовых записей отображается автор операции.
+
 - `GET /partners/terms` — публичные текущие условия.
+- `GET /partners/me/ledger?cursor=...`, `GET /partners/me/notifications?cursor=...` — собственные страницы журнала и уведомлений; курсор другого партнёра отклоняется.
+- `POST /partners/me/notifications/:id/read`, `POST /partners/me/notifications/read-all` — отметить свои уведомления прочитанными.
+- `GET /partner-admin/payouts/:id/history` — история заявки, только администратор.
 - `GET /partners/me`, `POST /partners/register`, `PUT /partners/me/details`, `POST /partners/me/payouts` — JWT пользователя, только собственные данные.
 - `/partner-admin/login`, `/partner-admin/session`, `/partner-admin/logout`, `/partner-admin/credentials` — отдельная серверная авторизация администратора.
 - `/partner-admin/data`, `/partner-admin/terms`, `/partner-admin/payouts/:id/review`, `/partner-admin/payouts/:id/pay`, `/partner-admin/adjustments`, `/partner-admin/payments`, `/partner-admin/payments/:id/refunds` — реестр и финансовые операции, только с административной сессией.

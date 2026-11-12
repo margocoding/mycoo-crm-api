@@ -19,7 +19,7 @@ import type {
 const meetingSelect = {
   id: true,
   workspaceId: true,
-  workspace: { select: { ownerId: true } },
+  workspace: { select: { ownerId: true, deletedAt: true } },
   title: true,
   startsAt: true,
   startedAt: true,
@@ -59,7 +59,8 @@ export class GuestMeetingsService {
       where: { guestInviteToken: token.toLowerCase() },
       select: meetingSelect,
     });
-    if (!meeting) throw new NotFoundException('Встреча не найдена.');
+    if (!meeting || meeting.workspace.deletedAt)
+      throw new NotFoundException('Встреча не найдена.');
     if (
       !(await db.subscription.count({
         where: {

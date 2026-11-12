@@ -6,10 +6,12 @@ import { PartnerController } from './partner.controller.js';
 import { PartnerAdminController } from './partner-admin.controller.js';
 import { PartnerAdminAuthService } from './partner-admin-auth.service.js';
 import { PartnerAdminGuard } from './partner-admin.guard.js';
+import { MailModule } from '../mail/mail.module.js';
+import { PartnerNotificationEmails } from './partner-notification-emails.js';
 
 @Module({
-  imports: [PartnerCoreModule, AuthModule, RedisModule],
+  imports: [PartnerCoreModule, AuthModule, RedisModule, MailModule],
   controllers: [PartnerController, PartnerAdminController],
-  providers: [PartnerAdminAuthService, PartnerAdminGuard],
+  providers: [PartnerAdminAuthService, PartnerAdminGuard, PartnerNotificationEmails],
 })
 export class PartnerModule {}

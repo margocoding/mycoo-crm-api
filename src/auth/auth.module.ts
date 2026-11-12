@@ -10,6 +10,9 @@ import { AuthService } from "./auth.service.js";
 import { JwtAuthGuard } from "./jwt-auth.guard.js";
 import { BillingCoreModule } from '../billing/billing-core.module.js';
 import { PartnerCoreModule } from '../partners/partner-core.module.js';
+import { OAuthController } from './oauth.controller.js';
+import { OAuthService } from './oauth.service.js';
+import { OptionalJwtAuthGuard } from './optional-jwt-auth.guard.js';
 
 @Module({
   imports: [
@@ -27,8 +30,8 @@ import { PartnerCoreModule } from '../partners/partner-core.module.js';
     BillingCoreModule,
     PartnerCoreModule,
   ],
-  controllers: [AuthController],
-  providers: [AuthService, JwtAuthGuard],
-  exports: [AuthService, JwtAuthGuard, JwtModule],
+  controllers: [AuthController, OAuthController],
+  providers: [AuthService, OAuthService, JwtAuthGuard, OptionalJwtAuthGuard],
+  exports: [AuthService, JwtAuthGuard, OptionalJwtAuthGuard, JwtModule],
 })
 export class AuthModule {}

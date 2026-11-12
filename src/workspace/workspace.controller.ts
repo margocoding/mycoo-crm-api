@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   Param,
@@ -123,5 +124,16 @@ export class WorkspaceController {
   @ApiResponse({ status: 200, type: WorkspaceRdo })
   getWorkspace(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
     return this.workspaceService.getWorkspace(req.user!.sub, id);
+  }
+
+  @Delete(':id')
+  remove(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
+    return this.workspaceService.remove(req.user!.sub, id);
+  }
+
+  @Post(':id/leave')
+  @HttpCode(200)
+  leave(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
+    return this.workspaceService.leave(req.user!.sub, id);
   }
 }
