@@ -90,6 +90,7 @@ try {
     assert.equal((await call('/partner-admin/session', { token: adminToken })).login, adminLogin);
     await call('/partners/me', { token: adminToken, status: 401 });
     await call('/partner-admin/terms', { method: 'PUT', token: adminToken, body: { commissionPercent: 20, eligibleMonths: 12, holdDays: 14, minimumPayout: 5000 } });
+    assert.equal((await call('/partners/terms')).holdDays, 0);
   });
   await check('test payment callbacks never accrue commission and checkout preserves the stored payment mode', async () => {
     const request = { plan: 'START', period: 'MONTH', idempotencyKey: randomUUID() };
@@ -123,13 +124,17 @@ try {
     assert.equal(data.ledger.filter(entry => entry.kind === 'commission').length, 1); assert.equal(data.ledger[0].amount, 10000);
     assert.equal((await prisma.paymentOrder.findUnique({ where: { id: order.id } })).status, 'PAID');
   });
-  await check('hold blocks withdrawal and payment details required', async () => {
+  await check('new commission is available immediately but details and sufficient balance remain required', async () => {
+    const storedPayment = await prisma.partnerPayment.findFirstOrThrow({ where: { referralId: referral.id } });
+    assert.equal(storedPayment.availableAt.getTime(), storedPayment.paidAt.getTime());
+    const storedEntry = await prisma.partnerLedgerEntry.findFirstOrThrow({ where: { paymentId: storedPayment.id, kind: 'commission' } });
+    assert.equal(storedEntry.availableAt.getTime(), storedPayment.paidAt.getTime());
     await call('/partners/me/payouts', { token: partner.accessToken, body: { amount: 5000, idempotencyKey: randomUUID() }, status: 400 });
     await call('/partners/me/details', { method: 'PUT', token: partner.accessToken, body: details });
-    await call('/partners/me/payouts', { token: partner.accessToken, body: { amount: 5000, idempotencyKey: randomUUID() }, status: 409 });
+    await call('/partners/me/payouts', { token: partner.accessToken, body: { amount: 11000, idempotencyKey: randomUUID() }, status: 409 });
   });
   await check('available corrections reserve once and parallel requests cannot overspend', async () => {
-    const adjustment = { partnerId, amount: 10000, description: 'Сверка тестовой операции', idempotencyKey: randomUUID() };
+    const adjustment = { partnerId, amount: 1000, description: 'Сверка тестовой операции', idempotencyKey: randomUUID() };
     const replies = await Promise.all([0, 1].map(() => call('/partner-admin/adjustments', { token: adminToken, body: adjustment })));
     assert.equal(replies[0].id, replies[1].id);
     await call('/partner-admin/adjustments', { token: adminToken, body: { ...adjustment, amount: 20000 }, status: 409 });

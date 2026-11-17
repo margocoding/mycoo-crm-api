@@ -11,6 +11,8 @@ type Terms = { commissionPercent: number; eligibleMonths: number; holdDays: numb
 type Result = { ok: true; id: string };
 const ok = (id: string): Result => ({ ok: true, id });
 const activePayouts = ['new', 'review', 'approved'];
+// Temporarily disable holds for new accruals; saved ledger dates remain unchanged.
+const COMMISSION_HOLD_ENABLED = false;
 const text = (value: string | undefined, max: number, required = true) => {
   const result = value?.trim() ?? '';
   if ((required && !result) || result.length > max) throw new BadRequestException('Проверьте заполнение текстовых полей.');
@@ -50,7 +52,7 @@ export class PartnerService {
   }
 
   private termsView(terms: PartnerTerms): Terms {
-    return { commissionPercent: terms.commissionBps / 100, eligibleMonths: terms.eligibleMonths, holdDays: terms.holdDays, minimumPayout: terms.minimumPayoutKopecks / 100 };
+    return { commissionPercent: terms.commissionBps / 100, eligibleMonths: terms.eligibleMonths, holdDays: COMMISSION_HOLD_ENABLED ? terms.holdDays : 0, minimumPayout: terms.minimumPayoutKopecks / 100 };
   }
 
   async getTerms() { return this.termsView(await this.termsAt(this.prisma)); }
@@ -319,7 +321,8 @@ export class PartnerService {
     const terms = await this.termsAt(tx, data.paidAt);
     const eligible = data.paidAt >= data.registeredAt && data.paidAt < addMonths(data.registeredAt, terms.eligibleMonths);
     const commissionKopecks = eligible ? proportional(data.amountKopecks, terms.commissionBps, 10000) : 0;
-    const availableAt = new Date(data.paidAt.getTime() + terms.holdDays * DAY);
+    const holdDays = COMMISSION_HOLD_ENABLED ? terms.holdDays : 0;
+    const availableAt = new Date(data.paidAt.getTime() + holdDays * DAY);
     const payment = await tx.partnerPayment.create({ data: { externalId: data.externalId, orderId: data.orderId, referralId: data.referralId, amountKopecks: data.amountKopecks, commissionKopecks, termsId: terms.id, paidAt: data.paidAt, availableAt } });
     if (commissionKopecks > 0) await tx.partnerLedgerEntry.create({ data: { partnerId: data.partnerId, referralId: data.referralId, paymentId: payment.id, kind: 'commission', amountKopecks: commissionKopecks, availableAt, description: `Комиссия ${terms.commissionBps / 100}% по оплате ${data.externalId}`, actorId: data.actor, operationKey: `commission:${payment.id}` } });
     return payment;
