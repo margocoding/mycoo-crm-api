@@ -13,6 +13,7 @@ import { RedisService } from '../redis/redis.service.js';
 import type { DepartmentDto, InvitationDto } from './dto/team.dto.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { assertSingleWorkspace, lockMembership } from '../workspace/workspace-membership.js';
+import { UsageService } from '../usage/usage.service.js';
 
 const invitationSelect = {
   id: true, email: true, name: true, role: true, departmentId: true,
@@ -28,6 +29,7 @@ export class TeamService {
     private readonly mail: MailService,
     private readonly config: ConfigService,
     private readonly notifications: NotificationsService,
+    private readonly usage: UsageService,
   ) {}
 
   private async workspace(db: Prisma.TransactionClient, userId: string, id: string) {
@@ -162,6 +164,7 @@ export class TeamService {
         throw new ForbiddenException('Администратор не может назначать руководителя.');
       const member = await tx.departmentMember.findFirst({ where: { departmentId, user: { email: dto.email } } });
       if (member) throw new ConflictException('Этот пользователь уже в департаменте. Измените его роль в списке.');
+      await this.usage.assertSeat(tx, workspaceId, dto.email);
       const pending = { departmentId, acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } };
       if (!access.canAssignChief && await tx.teamInvitation.findFirst({
         where: { ...pending, role: DepartmentRole.CHIEF, email: dto.email },
@@ -368,6 +371,7 @@ export class TeamService {
     const user = await this.transaction(workspaceId, async (tx) => {
       await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', 'invite-email:' + initial.email);
       const invitation = await this.activeInvitation(tx, token);
+      await this.usage.assertSeat(tx, workspaceId, invitation.email);
       const current = await tx.user.findUnique({ where: { email: invitation.email } });
       if (current) this.protectOwner(invitation.department.workspace.ownerId, current.id);
       if (current?.id !== existing?.id || current?.passwordHash !== existing?.passwordHash)

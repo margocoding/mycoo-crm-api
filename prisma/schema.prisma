@@ -158,6 +158,7 @@ model Subscription {
   kind        SubscriptionKind  @default(PAID)
   plan        SubscriptionPlan?
   period      BillingPeriod?
+  usageAnchorAt DateTime? @map("usage_anchor_at")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -498,6 +499,7 @@ enum NotificationKind {
   TASK_ASSIGNED
   MEETING_INVITED
   MEETING_PROTOCOL
+  AI_BUDGET
 }
 
 enum NotificationEmailStatus {
@@ -644,6 +646,10 @@ model MeetingRecording {
   egressId String? @unique @map("egress_id")
   status String @default("starting")
   fileKey String? @map("file_key")
+  sizeBytes BigInt? @map("size_bytes")
+  durationSeconds Int? @map("duration_seconds")
+  stopAfterAt DateTime? @map("stop_after_at")
+  speechUsageId String? @map("speech_usage_id")
   uploadId String? @map("upload_id")
   speechTaskId String? @map("speech_task_id")
   transcript String?
@@ -657,6 +663,46 @@ model MeetingRecording {
   createdAt DateTime @default(now()) @map("created_at")
   @@index([status, nextAttemptAt])
   @@map("meeting_recordings")
+}
+
+model UsageWindow {
+  id String @id @default(cuid())
+  key String @unique
+  ownerId String @map("owner_id")
+  startAt DateTime @map("start_at")
+  endAt DateTime? @map("end_at")
+  warningLevel Int @default(0) @map("warning_level")
+  warningBudgetRub Int @default(0) @map("warning_budget_rub")
+  entries UsageEntry[]
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([ownerId, startAt])
+  @@map("usage_windows")
+}
+
+model UsageEntry {
+  id String @id @default(cuid())
+  operationKey String @unique @map("operation_key")
+  windowId String @map("window_id")
+  window UsageWindow @relation(fields: [windowId], references: [id])
+  ownerId String @map("owner_id")
+  workspaceId String @map("workspace_id")
+  departmentId String? @map("department_id")
+  actorId String? @map("actor_id")
+  source String
+  model String?
+  kind String @default("AI")
+  status String @default("RESERVED")
+  inputTokens Int @default(0) @map("input_tokens")
+  outputTokens Int @default(0) @map("output_tokens")
+  audioSeconds Int @default(0) @map("audio_seconds")
+  costMicros BigInt @default(0) @map("cost_micros")
+  storageBytes BigInt @default(0) @map("storage_bytes")
+  createdAt DateTime @default(now()) @map("created_at")
+  settledAt DateTime? @map("settled_at")
+  @@index([windowId, status, kind])
+  @@index([ownerId, kind, status])
+  @@index([workspaceId, actorId, createdAt])
+  @@map("usage_entries")
 }
 
 model DashboardSnapshot {

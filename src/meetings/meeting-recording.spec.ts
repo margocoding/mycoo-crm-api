@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { usageFixture } from '../../test/usage.fixture.js';
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { MeetingsService } from './meetings.service.js';
@@ -28,7 +29,7 @@ function fixture() {
           : null,
       ),
       findFirst: vi.fn().mockResolvedValue(null),
-      create: vi.fn(),
+      create: vi.fn(async () => ({ id: 'next-recording' })),
       updateMany: vi.fn(),
     },
   };
@@ -46,6 +47,7 @@ function fixture() {
     calls as never,
     {} as never,
     {} as never,
+    usageFixture(),
   );
   vi.spyOn(service, 'access').mockResolvedValue({
     meeting,

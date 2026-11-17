@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { usageFixture, usageScope } from '../../test/usage.fixture.js';
 import { ConfigService } from '@nestjs/config';
 import { Logger, ServiceUnavailableException } from '@nestjs/common';
 import { GigachatService, parseAnalysis } from './gigachat.service.js';
@@ -19,7 +20,7 @@ const oauth = () =>
   json({ access_token: 'test-token', expires_at: Date.now() + 1_800_000 });
 const chat = (content = JSON.stringify(valid)) =>
   json({ choices: [{ message: { content }, finish_reason: 'stop' }] });
-const service = (extra = {}) =>
+const service = (extra = {}, usage = usageFixture()) =>
   new GigachatService(
     new ConfigService({
       GIGACHAT_CREDENTIALS: 'fixture',
@@ -28,6 +29,7 @@ const service = (extra = {}) =>
       GIGACHAT_RETRY_DELAY_MS: 0,
       ...extra,
     }),
+    usage,
   );
 beforeEach(() => {
   vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
@@ -38,6 +40,25 @@ afterEach(() => {
 });
 
 describe('GigaChat diagnostics', () => {
+  it('records actual cached and paid tokens even when model JSON needs another attempt', async () => {
+    const usage = usageFixture();
+    const reply = (content: string) => json({ usage: { prompt_tokens: 100, precached_prompt_tokens: 200, completion_tokens: 50 },
+      choices: [{ message: { content }, finish_reason: 'stop' }] });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(oauth()).mockResolvedValueOnce(reply('bad JSON')).mockResolvedValueOnce(reply(JSON.stringify(valid))));
+    await service({}, usage).analyzeDiagnostics(answer, usageScope);
+    expect(usage.reserve).toHaveBeenCalledTimes(2);
+    expect(usage.settle).toHaveBeenCalledTimes(2);
+    expect(usage.settle).toHaveBeenLastCalledWith('usage-reservation', { inputTokens: 300, outputTokens: 50, costMicros: 9750, audioSeconds: 0 }, 'CONFIRMED');
+  });
+  it('keeps a reservation after an uncertain network failure and frees a definitively rejected request', async () => {
+    const usage = usageFixture();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(oauth()).mockRejectedValueOnce(new TypeError('lost response')));
+    await expect(service({ GIGACHAT_MAX_RETRIES: 0 }, usage).analyzeDiagnostics(answer, usageScope)).rejects.toThrow();
+    expect(usage.settle).toHaveBeenLastCalledWith('usage-reservation', null, 'UNKNOWN');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(oauth()).mockResolvedValueOnce(json({}, 400)));
+    await expect(service({ GIGACHAT_MAX_RETRIES: 0 }, usage).analyzeDiagnostics(answer, usageScope)).rejects.toThrow();
+    expect(usage.settle).toHaveBeenLastCalledWith('usage-reservation', null, 'RELEASED');
+  });
   it('sends the meeting output contract with a dedicated model and retains unassigned actions', async () => {
     const protocol = {
       summary: 'Обновить сайт, исполнитель и срок пока не определены.',
@@ -49,7 +70,7 @@ describe('GigaChat diagnostics', () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(oauth())
       .mockResolvedValueOnce(chat(JSON.stringify(protocol)));
     vi.stubGlobal('fetch', fetchMock);
-    expect(await service({ GIGACHAT_MEETING_MODEL: 'GigaChat-2-Max' }).analyzeMeeting({ transcript: 'Нужно обновить сайт.' })).toEqual(protocol);
+    expect(await service({ GIGACHAT_MEETING_MODEL: 'GigaChat-2-Max' }).analyzeMeeting({ transcript: 'Нужно обновить сайт.' }, usageScope)).toEqual(protocol);
     const request = JSON.parse(fetchMock.mock.calls[1][1].body);
     expect(request.model).toBe('GigaChat-2-Max');
     expect(request.response_format).toBeUndefined();
@@ -64,7 +85,7 @@ describe('GigaChat diagnostics', () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(oauth())
       .mockResolvedValueOnce(chat('{"summary":"private meeting text","tasks":[{}]}'));
     vi.stubGlobal('fetch', fetchMock);
-    await expect(service({ GIGACHAT_MAX_RETRIES: 0 }).analyzeMeeting({})).rejects.toBeInstanceOf(ServiceUnavailableException);
+    await expect(service({ GIGACHAT_MAX_RETRIES: 0 }).analyzeMeeting({}, usageScope)).rejects.toBeInstanceOf(ServiceUnavailableException);
     expect(Logger.prototype.warn).toHaveBeenCalledWith('Meeting attempt 1 failed: Invalid model response');
     expect(JSON.stringify(vi.mocked(Logger.prototype.warn).mock.calls)).not.toContain('private meeting text');
   });
@@ -77,8 +98,8 @@ describe('GigaChat diagnostics', () => {
       .mockResolvedValueOnce(chat());
     vi.stubGlobal('fetch', fetchMock);
     const client = service({ GIGACHAT_MEETING_MODEL: 'GigaChat-2-Max' });
-    expect(await client.analyzeDiagnostics(answer)).toEqual(valid);
-    await client.analyzeDiagnostics(answer);
+    expect(await client.analyzeDiagnostics(answer, usageScope)).toEqual(valid);
+    await client.analyzeDiagnostics(answer, usageScope);
     expect(fetchMock).toHaveBeenCalledTimes(3);
     const body = JSON.parse(fetchMock.mock.calls[1][1].body);
     expect(body.messages[1].content).toContain(
@@ -97,7 +118,7 @@ describe('GigaChat diagnostics', () => {
       .mockResolvedValueOnce(chat('broken'))
       .mockResolvedValueOnce(chat());
     vi.stubGlobal('fetch', fetchMock);
-    expect(await service().analyzeDiagnostics(answer)).toEqual(valid);
+    expect(await service().analyzeDiagnostics(answer, usageScope)).toEqual(valid);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
@@ -107,7 +128,7 @@ describe('GigaChat diagnostics', () => {
       .mockResolvedValueOnce(oauth())
       .mockImplementation(() => Promise.resolve(chat('{"score":101}')));
     vi.stubGlobal('fetch', fetchMock);
-    await expect(service().analyzeDiagnostics(answer)).rejects.toBeInstanceOf(
+    await expect(service().analyzeDiagnostics(answer, usageScope)).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
     expect(fetchMock).toHaveBeenCalledTimes(7); // 1 OAuth + 6 completions.
@@ -121,7 +142,7 @@ describe('GigaChat diagnostics', () => {
         .mockResolvedValueOnce(oauth())
         .mockResolvedValueOnce(json({}, status));
       vi.stubGlobal('fetch', fetchMock);
-      await expect(service().analyzeDiagnostics(answer)).rejects.toBeInstanceOf(
+      await expect(service().analyzeDiagnostics(answer, usageScope)).rejects.toBeInstanceOf(
         ServiceUnavailableException,
       );
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -136,7 +157,7 @@ describe('GigaChat diagnostics', () => {
       .mockResolvedValueOnce(oauth())
       .mockResolvedValueOnce(chat());
     vi.stubGlobal('fetch', fetchMock);
-    expect(await service().analyzeDiagnostics(answer)).toEqual(valid);
+    expect(await service().analyzeDiagnostics(answer, usageScope)).toEqual(valid);
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
@@ -148,7 +169,7 @@ describe('GigaChat diagnostics', () => {
       .mockResolvedValueOnce(oauth())
       .mockResolvedValueOnce(json({}, 401));
     vi.stubGlobal('fetch', fetchMock);
-    await expect(service().analyzeDiagnostics(answer)).rejects.toBeInstanceOf(
+    await expect(service().analyzeDiagnostics(answer, usageScope)).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
     expect(fetchMock).toHaveBeenCalledTimes(4);
@@ -162,7 +183,7 @@ describe('GigaChat diagnostics', () => {
       .mockResolvedValueOnce(json({}, 429, { 'retry-after': '0' }))
       .mockResolvedValueOnce(chat());
     vi.stubGlobal('fetch', fetchMock);
-    expect(await service().analyzeDiagnostics(answer)).toEqual(valid);
+    expect(await service().analyzeDiagnostics(answer, usageScope)).toEqual(valid);
   });
 
   it('honours the overall time budget for Retry-After', async () => {
@@ -172,7 +193,7 @@ describe('GigaChat diagnostics', () => {
       .mockResolvedValueOnce(json({}, 429, { 'retry-after': '300' }));
     vi.stubGlobal('fetch', fetchMock);
     await expect(
-      service({ GIGACHAT_TOTAL_TIMEOUT_MS: 100 }).analyzeDiagnostics(answer),
+      service({ GIGACHAT_TOTAL_TIMEOUT_MS: 100 }).analyzeDiagnostics(answer, usageScope),
     ).rejects.toBeInstanceOf(ServiceUnavailableException);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -181,7 +202,7 @@ describe('GigaChat diagnostics', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     await expect(
-      service({ GIGACHAT_CREDENTIALS: '' }).analyzeDiagnostics(answer),
+      service({ GIGACHAT_CREDENTIALS: '' }).analyzeDiagnostics(answer, usageScope),
     ).rejects.toBeInstanceOf(ServiceUnavailableException);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -209,7 +230,7 @@ describe('GigaChat diagnostics', () => {
         .mockResolvedValueOnce(json({ choices: [{ message: { content: JSON.stringify(valid) }, finish_reason: reason }] }))
         .mockResolvedValueOnce(chat());
       vi.stubGlobal('fetch', fetchMock);
-      expect(await service().analyzeDiagnostics(answer)).toEqual(valid);
+      expect(await service().analyzeDiagnostics(answer, usageScope)).toEqual(valid);
       expect(fetchMock).toHaveBeenCalledTimes(3);
     },
   );
@@ -220,14 +241,14 @@ describe('GigaChat diagnostics', () => {
       .mockResolvedValueOnce(json({ choices: [] }))
       .mockResolvedValueOnce(chat());
     vi.stubGlobal('fetch', fetchMock);
-    expect(await service().analyzeDiagnostics(answer)).toEqual(valid);
+    expect(await service().analyzeDiagnostics(answer, usageScope)).toEqual(valid);
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it.each([400, 404, 422])('stops on a permanent request error %s', async (status) => {
     const fetchMock = vi.fn().mockResolvedValueOnce(oauth()).mockResolvedValueOnce(json({}, status));
     vi.stubGlobal('fetch', fetchMock);
-    await expect(service().analyzeDiagnostics(answer)).rejects.toBeInstanceOf(ServiceUnavailableException);
+    await expect(service().analyzeDiagnostics(answer, usageScope)).rejects.toBeInstanceOf(ServiceUnavailableException);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -235,7 +256,7 @@ describe('GigaChat diagnostics', () => {
     const fetchMock = vi.fn(async (url: string) => url.endsWith('/oauth') ? oauth() : chat());
     vi.stubGlobal('fetch', fetchMock);
     const client = service();
-    expect(await Promise.all([client.analyzeDiagnostics(answer), client.analyzeDiagnostics(answer)])).toEqual([valid, valid]);
+    expect(await Promise.all([client.analyzeDiagnostics(answer, usageScope), client.analyzeDiagnostics(answer, usageScope)])).toEqual([valid, valid]);
     expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/oauth'))).toHaveLength(1);
     expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/completions'))).toHaveLength(2);
   });
@@ -246,8 +267,8 @@ describe('GigaChat diagnostics', () => {
       .mockResolvedValueOnce(chat()).mockResolvedValueOnce(oauth()).mockResolvedValueOnce(chat());
     vi.stubGlobal('fetch', fetchMock);
     const client = service();
-    await client.analyzeDiagnostics(answer);
-    await client.analyzeDiagnostics(answer);
+    await client.analyzeDiagnostics(answer, usageScope);
+    await client.analyzeDiagnostics(answer, usageScope);
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer short-lived');
     expect(fetchMock.mock.calls[3][1].headers.Authorization).toBe('Bearer test-token');
@@ -257,7 +278,7 @@ describe('GigaChat diagnostics', () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(json({ access_token: 'expired', expires_at: 1 }))
       .mockResolvedValueOnce(oauth()).mockResolvedValueOnce(chat());
     vi.stubGlobal('fetch', fetchMock);
-    expect(await service().analyzeDiagnostics(answer)).toEqual(valid);
+    expect(await service().analyzeDiagnostics(answer, usageScope)).toEqual(valid);
     expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer test-token');
   });
 
@@ -269,7 +290,7 @@ describe('GigaChat diagnostics', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     const started = Date.now();
-    await expect(service({ GIGACHAT_REQUEST_TIMEOUT_MS: 50, GIGACHAT_TOTAL_TIMEOUT_MS: 120 }).analyzeDiagnostics(answer))
+    await expect(service({ GIGACHAT_REQUEST_TIMEOUT_MS: 50, GIGACHAT_TOTAL_TIMEOUT_MS: 120 }).analyzeDiagnostics(answer, usageScope))
       .rejects.toBeInstanceOf(ServiceUnavailableException);
     expect(Date.now() - started).toBeLessThan(1000);
     expect(signals.length).toBeGreaterThan(0);
@@ -285,7 +306,7 @@ describe('GigaChat diagnostics', () => {
       { questionId: 'q9', text: comment, skip: false },
       { questionId: 'q1', opt: 1, text: 'SKIPPED', skip: true },
       { questionId: 'injected', text: 'UNKNOWN', skip: false },
-    ]);
+    ], usageScope);
     const request = JSON.parse(fetchMock.mock.calls[1][1].body);
     expect(request.model).toBe('GigaChat-2');
     expect(request.messages[0].role).toBe('system');
@@ -307,7 +328,7 @@ describe('GigaChat diagnostics', () => {
     const healthy = { score: 95, risks: [], summary: 'По ответам процессы организованы, риски не выявлены.' };
     const fetchMock = vi.fn().mockResolvedValueOnce(oauth()).mockResolvedValueOnce(chat(JSON.stringify(healthy)));
     vi.stubGlobal('fetch', fetchMock);
-    expect(await service().analyzeDiagnostics(answer)).toEqual(healthy);
+    expect(await service().analyzeDiagnostics(answer, usageScope)).toEqual(healthy);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

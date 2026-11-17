@@ -1,3 +1,5 @@
+import type { UsageScope } from '../usage/usage.policy.js';
+
 export interface CooMessage {
   role: 'user' | 'assistant';
   content: string;
@@ -6,6 +8,7 @@ export interface CooMessage {
 }
 
 export interface CooChatRequest {
+  usage: UsageScope;
   context: unknown;
   messages: CooMessage[];
   clientId: string;

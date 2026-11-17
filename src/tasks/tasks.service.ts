@@ -6,6 +6,7 @@ import { DashboardService } from '../dashboard/dashboard.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { canCompleteTask, canEditAssignedTask } from './task-permissions.js';
 import { scheduleRecurrence } from './task-recurrence.js';
+import { UsageService } from '../usage/usage.service.js';
 
 const taskInclude = {
   meeting: { select: { id: true, title: true, startsAt: true } },
@@ -18,7 +19,7 @@ type Access = Awaited<ReturnType<TeamService['departmentAccess']>>;
 @Injectable()
 export class TasksService {
   constructor(private readonly team: TeamService, private readonly dashboard: DashboardService,
-    private readonly notifications: NotificationsService) {}
+    private readonly notifications: NotificationsService, private readonly usage: UsageService) {}
 
   private canEdit(task: TaskRow, access: Access) {
     return canEditAssignedTask(access.isOwner, access.role, task.assignedByRole, task.departments.length);
@@ -114,6 +115,7 @@ export class TasksService {
         ? { departmentIds: [departmentId], assignees: [], details: { title: dto.title, startDate: new Date(dto.startDate || dto.dueDate), dueDate: new Date(dto.dueDate), priority: dto.priority, successCriteria: dto.successCriteria } }
         : await this.taskData(tx, access, dto);
       if (details.startDate > details.dueDate) throw new BadRequestException('Дата начала не может быть позже даты окончания.');
+      await this.usage.assertTasks(tx, workspaceId);
       const task = await tx.task.create({
         data: { ...details, workspaceId, meetingId, createdById: userId, assignedById: userId, assignedByRole: this.assigningRole(access),
           departments: { create: departmentIds.map((departmentId) => ({ departmentId })) },
@@ -166,6 +168,7 @@ export class TasksService {
     const { result, refreshKeys } = await this.team.transaction(workspaceId, async (tx) => {
       const access = await this.team.departmentAccess(tx, userId, workspaceId, departmentId);
       const previous = await this.find(tx, access, id, userId);
+      if (previous.status === 'done' && status !== 'done') await this.usage.assertTasks(tx, workspaceId);
       if (!canCompleteTask(access.canManage, previous.createdById, userId) && status === 'done') throw new ForbiddenException('Статус «Готово» устанавливает собственник, руководитель, администратор или создатель задачи.');
       const task = await tx.task.update({ where: { id }, data: { status }, include: taskInclude });
       const refreshKeys = status === 'done' && previous.status !== 'done'

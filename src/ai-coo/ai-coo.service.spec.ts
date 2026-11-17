@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { usageFixture } from '../../test/usage.fixture.js';
 import { BadRequestException, ConflictException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AiCooDocument, AiCooTurn } from '../../generated/prisma/client.js';
@@ -104,7 +105,7 @@ function fixture() {
   };
   const links = { collect: vi.fn(async () => ({ sources: [], omitted: 0 })) };
   const service = new AiCooService(prisma as PrismaService, context as unknown as AiCooContextService,
-    provider as unknown as GigachatService, links as unknown as AiCooLinksService);
+    provider as unknown as GigachatService, links as unknown as AiCooLinksService, usageFixture());
   return { service, prisma, provider, context, access, conversations, turns, documents, links };
 }
 

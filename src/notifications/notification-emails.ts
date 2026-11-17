@@ -80,7 +80,9 @@ export class NotificationEmails implements OnModuleInit, OnModuleDestroy {
     if (!item || item.emailStatus !== 'PENDING') return;
     const member = item.workspace.ownerId === item.recipientId || item.workspace.members.some(m => m.userId === item.recipientId);
     const meetingMember = !item.meetingId || item.workspace.ownerId === item.recipientId || Boolean(item.departmentId && await this.prisma.departmentMember.count({ where: { departmentId: item.departmentId, userId: item.recipientId } }));
-    const relevant = item.meetingId ? meetingMember && await this.prisma.meeting.count({ where: { id: item.meetingId, workspaceId: item.workspaceId,
+    const relevant = item.kind === 'AI_BUDGET'
+      ? item.workspace.ownerId === item.recipientId || await this.prisma.departmentMember.count({ where: { userId: item.recipientId, role: 'ADMIN', department: { workspaceId: item.workspaceId } } })
+      : item.meetingId ? meetingMember && await this.prisma.meeting.count({ where: { id: item.meetingId, workspaceId: item.workspaceId,
       participants: { some: { userId: item.recipientId, removed: false } } } })
       : item.kind === 'TASK_ASSIGNED' ? item.task?.assignees.some(a => a.userId === item.recipientId)
       : item.departmentId && await this.prisma.departmentMember.findUnique({

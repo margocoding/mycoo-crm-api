@@ -6,6 +6,7 @@ import { PrismaService } from '../../prisma/prisma.service.js';
 import { TeamService } from '../team/team.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { nextRecurrence, recurrenceDate, TASK_DAY } from './task-recurrence.js';
+import { UsageService } from '../usage/usage.service.js';
 
 @Injectable()
 export class TaskRecurrenceService implements OnModuleInit, OnModuleDestroy {
@@ -17,7 +18,7 @@ export class TaskRecurrenceService implements OnModuleInit, OnModuleDestroy {
   private closing = false;
 
   constructor(private readonly prisma: PrismaService, private readonly team: TeamService,
-    private readonly notifications: NotificationsService, private readonly config: ConfigService) {}
+    private readonly notifications: NotificationsService, private readonly config: ConfigService, private readonly usage: UsageService) {}
 
   async onModuleInit() {
     const url = this.config.getOrThrow<string>('REDIS_URL');
@@ -64,6 +65,7 @@ export class TaskRecurrenceService implements OnModuleInit, OnModuleDestroy {
         const repeatDate = new Date(date);
         const existing = await tx.task.findUnique({ where: { repeatSourceId_repeatDate: { repeatSourceId: source.id, repeatDate } } });
         if (!existing) {
+          await this.usage.assertTasks(tx, source.workspaceId);
           const durationDays = Math.max(0, Math.round((source.dueDate.getTime() - source.startDate.getTime()) / TASK_DAY));
           const task = await tx.task.create({ data: {
             workspaceId: source.workspaceId, title: source.title, startDate: repeatDate,
