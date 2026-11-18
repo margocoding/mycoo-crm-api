@@ -92,6 +92,31 @@ try {
     await call('/partner-admin/terms', { method: 'PUT', token: adminToken, body: { commissionPercent: 20, eligibleMonths: 12, holdDays: 14, minimumPayout: 5000 } });
     assert.equal((await call('/partners/terms')).holdDays, 0);
   });
+  await check('administrator saves a shared payout frequency and first date for every partner', async () => {
+    const terms = { commissionPercent: 20, eligibleMonths: 12, holdDays: 0, minimumPayout: 5000, payoutAnchorDate: '2099-01-31' };
+    for (const payoutFrequency of ['WEEKLY', 'MONTHLY', 'QUARTERLY', 'YEARLY']) {
+      await call('/partner-admin/terms', { method: 'PUT', token: adminToken, body: { ...terms, payoutFrequency } });
+      for (const visible of [await call('/partners/terms'), (await call('/partners/me', { token: partner.accessToken })).terms, (await call('/partner-admin/data', { token: adminToken })).terms]) {
+        assert.equal(visible.payoutFrequency, payoutFrequency);
+        assert.equal(visible.payoutAnchorDate, terms.payoutAnchorDate);
+        assert.equal(visible.nextPayoutDate, terms.payoutAnchorDate);
+      }
+    }
+    // Older clients updating commission terms must not reset the shared calendar.
+    await call('/partner-admin/terms', { method: 'PUT', token: adminToken, body: { commissionPercent: 20, eligibleMonths: 12, holdDays: 0, minimumPayout: 5000 } });
+    assert.equal((await call('/partners/terms')).payoutFrequency, 'YEARLY');
+    assert.equal((await call('/partners/terms')).payoutAnchorDate, terms.payoutAnchorDate);
+  });
+  await check('invalid dates, frequencies and ordinary users cannot change the payout calendar', async () => {
+    const terms = { commissionPercent: 20, eligibleMonths: 12, holdDays: 0, minimumPayout: 5000, payoutFrequency: 'MONTHLY', payoutAnchorDate: '2099-01-31' };
+    const before = await call('/partners/terms');
+    for (const payoutFrequency of ['DAILY', null, 7])
+      await call('/partner-admin/terms', { method: 'PUT', token: adminToken, body: { ...terms, payoutFrequency }, status: 400 });
+    for (const payoutAnchorDate of ['2026-02-30', '2026-11-20T12:00:00Z', '', null])
+      await call('/partner-admin/terms', { method: 'PUT', token: adminToken, body: { ...terms, payoutAnchorDate }, status: 400 });
+    await call('/partner-admin/terms', { method: 'PUT', token: partner.accessToken, body: terms, status: 401 });
+    assert.deepEqual(await call('/partners/terms'), before);
+  });
   await check('test payment callbacks never accrue commission and checkout preserves the stored payment mode', async () => {
     const request = { plan: 'START', period: 'MONTH', idempotencyKey: randomUUID() };
     const checkout = await call('/billing/orders', { token: client.accessToken, body: request });
@@ -145,6 +170,9 @@ try {
     assert.equal(requests.filter(r => r.status < 300).length, 1); assert.equal(requests.filter(r => r.status === 409).length, 1);
     payoutId = requests.find(r => r.status < 300).data.id;
     const data = await call('/partners/me', { token: partner.accessToken }); assert.equal(data.payouts.length, 1);
+    // The schedule controls payout planning, not when a partner may submit a request.
+    assert.equal(data.terms.nextPayoutDate, '2099-01-31');
+    assert(new Date(data.payouts[0].createdAt) < new Date(data.terms.nextPayoutDate));
   });
   await check('payout detail snapshot, review and partial payment', async () => {
     await call('/partners/me/details', { method: 'PUT', token: partner.accessToken, body: { ...details, recipient: 'Изменённый получатель' } });

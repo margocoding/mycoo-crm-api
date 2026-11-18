@@ -1,13 +1,16 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
-import type { Prisma, PartnerTerms, PaymentOrder } from '../../generated/prisma/client.js';
+import type { Prisma, PartnerTerms, PartnerPayoutFrequency, PaymentOrder } from '../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { accountBalance, addMonths, DAY, eventDate, kopecks, proportional } from './partner.money.js';
 import { pageAfter, payoutNotification } from './partner.notifications.js';
+import { nextPayoutDate, parsePayoutDate } from './partner.schedule.js';
 
 type Tx = Prisma.TransactionClient;
 type Details = { recipient: string; taxId: string; bank: string; account: string; bic: string; legalForm: 'self-employed' | 'entrepreneur' | 'company' };
-type Terms = { commissionPercent: number; eligibleMonths: number; holdDays: number; minimumPayout: number };
+type Terms = { commissionPercent: number; eligibleMonths: number; holdDays: number; minimumPayout: number;
+  payoutFrequency: PartnerPayoutFrequency; payoutAnchorDate: string | null; nextPayoutDate: string | null };
+type TermsInput = Omit<Terms, 'payoutFrequency' | 'payoutAnchorDate' | 'nextPayoutDate'> & { payoutFrequency?: PartnerPayoutFrequency; payoutAnchorDate?: string };
 type Result = { ok: true; id: string };
 const ok = (id: string): Result => ({ ok: true, id });
 const activePayouts = ['new', 'review', 'approved'];
@@ -52,7 +55,10 @@ export class PartnerService {
   }
 
   private termsView(terms: PartnerTerms): Terms {
-    return { commissionPercent: terms.commissionBps / 100, eligibleMonths: terms.eligibleMonths, holdDays: COMMISSION_HOLD_ENABLED ? terms.holdDays : 0, minimumPayout: terms.minimumPayoutKopecks / 100 };
+    return { commissionPercent: terms.commissionBps / 100, eligibleMonths: terms.eligibleMonths, holdDays: COMMISSION_HOLD_ENABLED ? terms.holdDays : 0,
+      minimumPayout: terms.minimumPayoutKopecks / 100, payoutFrequency: terms.payoutFrequency,
+      payoutAnchorDate: terms.payoutAnchorDate?.toISOString().slice(0, 10) ?? null,
+      nextPayoutDate: nextPayoutDate(terms.payoutAnchorDate, terms.payoutFrequency) };
   }
 
   async getTerms() { return this.termsView(await this.termsAt(this.prisma)); }
@@ -347,14 +353,22 @@ export class PartnerService {
     });
   }
 
-  async updateTerms(adminId: string, input: Terms) {
+  async updateTerms(adminId: string, input: TermsInput) {
     const commissionBps = Math.round(input.commissionPercent * 100);
     if (!Number.isFinite(input.commissionPercent) || input.commissionPercent < 0 || input.commissionPercent > 100 ||
       Math.abs(commissionBps - input.commissionPercent * 100) > 0.00001 ||
       !Number.isInteger(input.eligibleMonths) || input.eligibleMonths < 1 || input.eligibleMonths > 120 ||
       !Number.isInteger(input.holdDays) || input.holdDays < 0 || input.holdDays > 365) throw new BadRequestException('Проверьте условия партнёрской программы.');
     const minimumPayoutKopecks = kopecks(input.minimumPayout);
-    const terms = await this.prisma.partnerTerms.create({ data: { commissionBps, eligibleMonths: input.eligibleMonths, holdDays: input.holdDays, minimumPayoutKopecks, actorId: `admin:${adminId}` } });
-    return ok(terms.id);
+    if (input.payoutFrequency !== undefined && !['WEEKLY', 'MONTHLY', 'QUARTERLY', 'YEARLY'].includes(input.payoutFrequency))
+      throw new BadRequestException('Выберите частоту выплат.');
+    const anchor = input.payoutAnchorDate === undefined ? undefined : parsePayoutDate(input.payoutAnchorDate);
+    return this.transaction(async tx => {
+      const current = await this.termsAt(tx);
+      const terms = await tx.partnerTerms.create({ data: { commissionBps, eligibleMonths: input.eligibleMonths, holdDays: input.holdDays,
+        minimumPayoutKopecks, payoutFrequency: input.payoutFrequency ?? current.payoutFrequency,
+        payoutAnchorDate: anchor ?? current.payoutAnchorDate, actorId: `admin:${adminId}` } });
+      return ok(terms.id);
+    });
   }
 }

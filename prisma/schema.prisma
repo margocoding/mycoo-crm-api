@@ -349,12 +349,21 @@ model PartnerNotification {
   @@map("partner_notifications")
 }
 
+enum PartnerPayoutFrequency {
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  YEARLY
+}
+
 model PartnerTerms {
   id                   String   @id @default(cuid())
   commissionBps        Int      @map("commission_bps")
   eligibleMonths       Int      @map("eligible_months")
   holdDays             Int      @map("hold_days")
   minimumPayoutKopecks Int      @map("minimum_payout_kopecks")
+  payoutFrequency      PartnerPayoutFrequency @default(MONTHLY) @map("payout_frequency")
+  payoutAnchorDate      DateTime? @db.Date @map("payout_anchor_date")
   effectiveAt          DateTime @default(now()) @map("effective_at")
   actorId              String   @map("actor_id")
   payments             PartnerPayment[]
