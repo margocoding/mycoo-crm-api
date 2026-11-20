@@ -19,6 +19,7 @@ import type {
 } from './meetings.dto.js';
 import { parseMeetingAnalysis } from './meeting-analysis.js';
 import { GigachatService } from '../gigachat/gigachat.service.js';
+import { UsageService } from '../usage/usage.service.js';
 
 const include = {
   guests: true,
@@ -38,6 +39,7 @@ export class MeetingsService {
     private readonly calls: CallsClient,
     private readonly config: ConfigService,
     private readonly ai: GigachatService,
+    private readonly usage: UsageService,
   ) {}
 
   async access(
@@ -584,8 +586,10 @@ export class MeetingsService {
               status: { in: ['starting', 'recording', 'stopping'] },
             },
           }))
-        )
-          await tx.meetingRecording.create({ data: { meetingId: id } });
+        ) {
+          const recording = await tx.meetingRecording.create({ data: { meetingId: id, stopAfterAt: new Date(Date.now() + 4 * 3600_000) } });
+          await this.usage.reserveStorage(tx, workspaceId, 2_000_000_000, 'recording:' + recording.id, userId);
+        }
       }
       if (action === 'stop-record' || action === 'end')
         await tx.meetingRecording.updateMany({
@@ -898,7 +902,7 @@ export class MeetingsService {
       department: m.department.name,
       previous: previous?.publishedAt ? previous.analysis : null,
       tasks,
-    });
+    }, { workspaceId, departmentId: m.departmentId, actorId: userId, source: 'meeting-preparation' });
     // An explicit click applies the suggestion in the browser; never overwrite a concurrent edit.
     return result;
   }

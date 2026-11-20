@@ -1,5 +1,6 @@
 import {
   Injectable,
+  HttpException,
   Logger,
   OnModuleDestroy,
   OnModuleInit,
@@ -12,6 +13,10 @@ import { Prisma } from '../../generated/prisma/client.js';
 import { GigachatService } from '../gigachat/gigachat.service.js';
 import { CallsClient, type CallRecording } from './calls.client.js';
 import type { MeetingAnalysis } from './meeting-analysis.js';
+import { UsageService } from '../usage/usage.service.js';
+import type { UsageAmount } from '../usage/usage.policy.js';
+
+interface RecordingInfo { sizeBytes: number; audioSeconds: number; provider: string }
 
 @Injectable()
 export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
@@ -28,6 +33,7 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
     private readonly calls: CallsClient,
     private readonly ai: GigachatService,
     private readonly config: ConfigService,
+    private readonly usage: UsageService,
   ) {}
   async onModuleInit() {
     const url = this.config.getOrThrow<string>('REDIS_URL');
@@ -68,7 +74,7 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
     this.backgroundWorker = new Worker(
       'meetings-background',
       (job) =>
-        job.name === 'recording'
+        job.name === 'inspect' ? this.inspect(job.data.id as string) : job.name === 'recording'
           ? this.recording(job.data.id as string)
           : this.analyze(job.data.id as string),
       { connection: this.consumer, concurrency: 2 },
@@ -106,6 +112,12 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
     const now = new Date();
     // These DB leases also protect scans running in several API instances.
     if (this.calls.configured) {
+      await this.prisma.meetingRecording.updateMany({ where: { status: { in: ['starting', 'recording'] }, stopAfterAt: { lte: now } },
+        data: { status: 'stopping', stopRequestedAt: now, nextAttemptAt: now } });
+      const unmeasured = await this.prisma.meetingRecording.findMany({ where: { fileKey: { not: null }, sizeBytes: null,
+        status: { in: ['ready', 'failed'] }, meeting: { workspace: { deletedAt: null } } }, select: { id: true }, take: 10 });
+      for (const row of unmeasured) await this.backgroundQueue?.add('inspect', { id: row.id },
+        { jobId: 'inspect-' + row.id, removeOnComplete: true, removeOnFail: true });
       await this.revokeRemovedParticipants();
       const recordings = await this.prisma.meetingRecording.findMany({
         where: {
@@ -218,19 +230,29 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
         meeting: { include: { workspace: { select: { deletedAt: true } } } },
       },
     });
+    let speechUsageId: string | undefined;
+    let speechAmount: UsageAmount | undefined;
+    let dispatched = false;
     try {
       const room = row.meeting.roomName;
       if (row.meeting.workspace?.deletedAt && row.status === 'transcribing')
         return;
       if (row.status === 'starting' && row.meeting.status !== 'live') {
-        await this.prisma.meetingRecording.update({
-          where: { id },
-          data: {
-            status: 'failed',
-            error: 'Встреча закончилась до начала записи.',
-          },
-        });
-        return;
+        // A previous start response may have been lost. Stop that capture before
+        // releasing capacity, even if the meeting has ended in the meantime.
+        const existing = (await this.calls.request<CallRecording[]>(room, '/recordings'))
+          .find(entry => entry.recordingId === row.id);
+        if (!existing) {
+          await this.prisma.$transaction(async tx => {
+            await this.usage.lockStorage(tx, row.meeting.workspaceId);
+            await tx.meetingRecording.update({ where: { id }, data: { status: 'failed', error: 'Встреча закончилась до начала записи.' } });
+            await this.usage.releaseStorage(tx, 'recording:' + id);
+          });
+          return;
+        }
+        row.status = 'stopping';
+        row.egressId = existing.id;
+        await this.prisma.meetingRecording.update({ where: { id }, data: { status: 'stopping', egressId: existing.id, stopRequestedAt: new Date() } });
       }
       let recordings = row.fileKey
         ? []
@@ -261,6 +283,10 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
             where: { id },
             data: { status: 'failed', error: 'Запись остановлена до начала.' },
           });
+          await this.prisma.$transaction(async tx => {
+            await this.usage.lockStorage(tx, row.meeting.workspaceId);
+            await this.usage.releaseStorage(tx, 'recording:' + id);
+          });
           return;
         }
         await this.prisma.meetingRecording.update({
@@ -285,11 +311,11 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
           where: { id },
           data: { egressId: egress.id },
         });
-      if (egress && [4, 5, 6].includes(egress.status))
+      if (egress && [4, 5].includes(egress.status))
         throw new Error('Запись не завершилась. Проверьте Egress и хранилище.');
       const key =
         row.fileKey ||
-        (egress?.status === 3 ? egress.files?.[0]?.filename : undefined);
+        (egress && [3, 6].includes(egress.status) ? egress.files?.[0]?.filename : undefined);
       if (egress?.status === 3 && !key)
         throw new Error('Completed recording has no output file');
       if (egress?.status === 2 && row.status !== 'stopping') {
@@ -316,12 +342,29 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
         return;
       }
       if (key) {
+        let info: RecordingInfo | undefined;
+        if (row.sizeBytes === null || row.durationSeconds === null || !row.speechTaskId) {
+          info = await this.calls.request<RecordingInfo>(room, '/recordings/info', 'POST', { key });
+          await this.saveRecordingInfo(row.id, row.meeting.workspaceId, key, info);
+        }
         await this.prisma.meetingRecording.update({
           where: { id },
           data: { fileKey: key, status: 'transcribing' },
         });
         if (row.status !== 'transcribing' || row.meeting.workspace?.deletedAt)
           return;
+        if ((info?.sizeBytes ?? Number(row.sizeBytes)) > 2_000_000_000)
+          throw new Error('Recording exceeds recognition download limit');
+        if (!row.speechTaskId) {
+          if (row.speechUsageId) await this.usage.settle(row.speechUsageId, null, 'UNKNOWN');
+          const provider = row.uploadId ? 'salute' : info!.provider;
+          speechAmount = this.usage.speechAmount(info!.audioSeconds, provider);
+          const reservation = await this.usage.reserve({ workspaceId: row.meeting.workspaceId,
+            departmentId: row.meeting.departmentId, actorId: row.meeting.organizerId, source: 'speech' }, speechAmount, provider);
+          speechUsageId = reservation.id;
+          await this.prisma.meetingRecording.update({ where: { id }, data: { speechUsageId } });
+        }
+        dispatched = true;
         const result = await this.calls.request<{
           uploadId?: string;
           taskId?: string;
@@ -331,7 +374,15 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
           key,
           uploadId: row.uploadId,
           taskId: row.speechTaskId,
+          ...(speechAmount ? { maxAudioSeconds: speechAmount.audioSeconds, expectedProvider: row.uploadId ? 'salute' : info!.provider } : {}),
         });
+        if (speechUsageId) {
+          // Salute's upload is not recognition yet. The next start request has
+          // its own reservation; a lost response never enables a free retry.
+          const accepted = Boolean(result.taskId) || typeof result.text === 'string';
+          await this.usage.settle(speechUsageId, accepted ? speechAmount! : null, accepted ? 'CONFIRMED' : 'RELEASED');
+          speechUsageId = undefined;
+        }
         if (result.failed || result.text === '')
           throw new Error('Сервис распознавания не вернул текст записи.');
         await this.prisma.meetingRecording.update({
@@ -349,14 +400,17 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
         if (result.text !== undefined)
           await this.queueTranscript(row.meetingId);
       }
-    } catch {
+    } catch (error) {
+      if (speechUsageId) await this.usage.settle(speechUsageId, null, dispatched ? 'UNKNOWN' : 'RELEASED');
+      const body = error instanceof HttpException ? error.getResponse() : null;
+      const quota = body && typeof body === 'object' && 'code' in body && ['USAGE_LIMIT_REACHED', 'SUBSCRIPTION_EXPIRED'].includes(String(body.code));
       const attempts = row.attempts + 1;
       await this.prisma.meetingRecording.updateMany({
         where: { id },
         data: {
           attempts,
-          ...(attempts >= 6 ? { status: 'failed' } : {}),
-          error:
+          ...(quota || attempts >= 6 ? { status: 'failed' } : {}),
+          error: quota && 'message' in body ? String(body.message) :
             'Не удалось обработать запись. Проверьте настройки LiveKit, хранилища и сервиса распознавания.',
         },
       });
@@ -371,6 +425,23 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
         },
       });
     }
+  }
+
+  private async saveRecordingInfo(id: string, workspaceId: string, key: string, info: RecordingInfo) {
+    if (!Number.isSafeInteger(info.sizeBytes) || info.sizeBytes <= 0 || !Number.isSafeInteger(info.audioSeconds) || info.audioSeconds <= 0)
+      throw new Error('Invalid recording metadata');
+    await this.prisma.$transaction(async tx => {
+      await this.usage.lockStorage(tx, workspaceId);
+      await tx.meetingRecording.update({ where: { id }, data: { fileKey: key, sizeBytes: BigInt(info.sizeBytes), durationSeconds: info.audioSeconds } });
+      await this.usage.releaseStorage(tx, 'recording:' + id);
+    });
+  }
+
+  async inspect(id: string) {
+    const row = await this.prisma.meetingRecording.findUnique({ where: { id }, include: { meeting: true } });
+    if (!row?.fileKey || row.sizeBytes !== null) return;
+    const info = await this.calls.request<RecordingInfo>(row.meeting.roomName, '/recordings/info', 'POST', { key: row.fileKey });
+    await this.saveRecordingInfo(id, row.meeting.workspaceId, row.fileKey, info);
   }
 
   async revokeRemovedParticipants() {
@@ -531,7 +602,7 @@ export class MeetingsWorker implements OnModuleInit, OnModuleDestroy {
         });
         if (!renewed.count) throw new Error('Analysis was replaced');
         where.processingUntil = nextLease;
-        return this.ai.analyzeMeeting(context);
+        return this.ai.analyzeMeeting(context, { workspaceId: m.workspaceId, departmentId: m.departmentId, actorId: m.organizerId, source: 'protocol' });
       };
       const employees = await this.prisma.user.findMany({
         where: {

@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { usageFixture, usageScope } from '../../test/usage.fixture.js';
 import { BadRequestException, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -15,8 +16,9 @@ const completion = (content = 'Начните с просроченных зад
 const service = (extra = {}) => new GigachatService(new ConfigService({
   GIGACHAT_CREDENTIALS: 'fixture', GIGACHAT_AUTH_URL: 'https://test.invalid/oauth',
   GIGACHAT_BASE_URL: 'https://test.invalid', GIGACHAT_RETRY_DELAY_MS: 0, ...extra,
-}));
+}), usageFixture());
 const request = (): CooChatRequest => ({
+  usage: usageScope,
   clientId: 'conversation-123', context: { company: 'Пример', tasks: [] },
   messages: [{ role: 'user', content: 'Какие приоритеты на неделю?' }],
 });

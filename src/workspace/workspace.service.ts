@@ -181,7 +181,7 @@ export class WorkspaceService {
       });
     });
     try {
-      const analysis = await this.gigachat.analyzeDiagnostics(answers);
+      const analysis = await this.gigachat.analyzeDiagnostics(answers, { workspaceId: workspace.id, actorId: userId, source: 'diagnostics', allowBeforeTrial: true });
       await this.prisma.$transaction(async tx => {
         const trialStartedAt = await this.billing.startTrial(tx, userId);
         const result = await tx.workspace.updateMany({

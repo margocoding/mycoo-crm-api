@@ -76,7 +76,7 @@ export class CallsClient {
       method === 'GET' ||
       method === 'HEAD' ||
       (method === 'POST' &&
-        (['/token', '/recordings/url'].includes(path) ||
+        (['/token', '/recordings/url', '/recordings/info'].includes(path) ||
           safeParticipantAction)) ||
       (method === 'DELETE' && path === '');
     const retries = safe ? 5 : 0;
@@ -103,7 +103,7 @@ export class CallsClient {
           // Bound the entire read/token operation, not only each attempt.
           signal: AbortSignal.timeout(
             safe
-              ? Math.min(10_000, remaining)
+              ? Math.min(path === '/recordings/info' ? 40_000 : 10_000, remaining)
               : path === '/recordings/transcribe'
                 ? 18 * 60_000
                 : 30_000,

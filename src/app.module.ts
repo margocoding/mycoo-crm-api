@@ -13,6 +13,7 @@ import { BillingModule } from './billing/billing.module.js';
 import { MeetingsModule } from './meetings/meetings.module.js';
 import { AiCooModule } from './ai-coo/ai-coo.module.js';
 import { PartnerModule } from './partners/partner.module.js';
+import { UsageModule } from './usage/usage.module.js';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { PartnerModule } from './partners/partner.module.js';
       isGlobal: true,
     }),
     PrismaModule,
+    UsageModule,
     RedisModule,
     MailModule,
     AuthModule,

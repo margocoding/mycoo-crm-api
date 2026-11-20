@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { AiCooConversation, AiCooDocument, AiCooTurn, Prisma } from '../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { GigachatService } from '../gigachat/gigachat.service.js';
+import { UsageService } from '../usage/usage.service.js';
 import type { CooMessage } from '../gigachat/coo.types.js';
 import { AiCooContextService, type AiCooContext } from './ai-coo-context.service.js';
 import { AiCooMessageDto } from './ai-coo.dto.js';
@@ -48,7 +49,7 @@ export class AiCooService {
   private readonly logger = new Logger(AiCooService.name);
 
   constructor(private readonly prisma: PrismaService, private readonly context: AiCooContextService,
-    private readonly gigachat: GigachatService, private readonly links: AiCooLinksService) {}
+    private readonly gigachat: GigachatService, private readonly links: AiCooLinksService, private readonly usage: UsageService) {}
 
   private async conversation(userId: string, workspaceId: string, departmentId?: string) {
     const context = await this.context.build(userId, workspaceId, departmentId);
@@ -165,7 +166,7 @@ export class AiCooService {
       const sourceMetadata = web.sources.map(({ text: _text, ...source }) => source);
       if (sourceMetadata.length) await this.withLease(id, token, tx => tx.aiCooTurn.update({ where: { id: turn.id },
         data: { documents: [...documentLabels, ...sourceMetadata] as Prisma.InputJsonValue } }));
-      const response = await this.gigachat.chatCoo({ clientId: id,
+      const response = await this.gigachat.chatCoo({ clientId: id, usage: { workspaceId, departmentId: context.scope.departmentId, actorId: userId, source: 'chat' },
         context: { ...context.prompt, documents: documentLabels.map(doc => ({ name: doc.name })),
           ...(web.sources.length ? { webSources: web.sources, omittedLinks: web.omitted } : {}) },
         messages: [...cooHistory(history, documents), { role: 'user', content: text,
@@ -192,23 +193,37 @@ export class AiCooService {
     const token = await this.lock(conversation.id);
     let uploadedId: string | undefined;
     let saved = false;
+    const storageKey = 'document:' + randomUUID();
+    let storageId: string | undefined;
     try {
       const count = await this.prisma.aiCooDocument.count({ where: { conversationId: conversation.id } });
       if (count >= COO_FILE_COUNT) throw new BadRequestException('В одном диалоге можно использовать не больше 5 документов. Удалите ненужные.');
+      storageId = (await this.prisma.$transaction(tx => this.usage.reserveStorage(tx, workspaceId, valid.size, storageKey, userId))).id;
       const uploaded = await this.gigachat.uploadCooDocument({ ...valid, clientId: conversation.id });
       uploadedId = uploaded.id;
       await this.verifyScope(userId, workspaceId, departmentId, context.scopeKey);
-      const document = await this.withLease(conversation.id, token, tx => tx.aiCooDocument.create({ data: {
-        conversationId: conversation.id, providerFileId: uploaded.id, name: valid.name, size: valid.size, mimeType: valid.mimeType,
-      } }));
+      const document = await this.withLease(conversation.id, token, async tx => {
+        await this.usage.lockStorage(tx, workspaceId);
+        const document = await tx.aiCooDocument.create({ data: {
+          conversationId: conversation.id, providerFileId: uploaded.id, name: valid.name, size: valid.size, mimeType: valid.mimeType,
+        } });
+        await this.usage.releaseStorage(tx, storageKey);
+        return document;
+      });
       saved = true;
       return this.presentDocument(document);
     } finally {
       if (uploadedId && !saved) {
-        try { await this.gigachat.deleteCooDocument(uploadedId, conversation.id); }
+        try {
+          await this.gigachat.deleteCooDocument(uploadedId, conversation.id);
+          if (storageId) await this.usage.settle(storageId, null, 'RELEASED');
+          storageId = undefined;
+        }
         catch { this.logger.warn('AI COO failed upload cleanup could not be completed.'); }
       }
-      await this.unlock(conversation.id, token);
+      try {
+        if (storageId && !saved) await this.usage.settle(storageId, null, 'UNKNOWN');
+      } finally { await this.unlock(conversation.id, token); }
     }
   }
 
@@ -220,7 +235,10 @@ export class AiCooService {
       if (!document) throw new NotFoundException('Документ не найден.');
       await this.gigachat.deleteCooDocument(document.providerFileId, conversation.id);
       await this.verifyScope(userId, workspaceId, departmentId, context.scopeKey);
-      await this.withLease(conversation.id, token, tx => tx.aiCooDocument.delete({ where: { id: document.id } }));
+      await this.withLease(conversation.id, token, async tx => {
+        await this.usage.lockStorage(tx, workspaceId);
+        await tx.aiCooDocument.delete({ where: { id: document.id } });
+      });
       return { deleted: true };
     } finally { await this.unlock(conversation.id, token); }
   }

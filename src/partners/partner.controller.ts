@@ -17,7 +17,7 @@ function userId(req: PartnerRequest): string {
 export class PartnerController {
   constructor(private readonly partners: PartnerService) {}
 
-  @Get('terms') terms() { return this.partners.getTerms(); }
+  @Get('terms') @Header('Cache-Control', 'no-store') terms() { return this.partners.getTerms(); }
 
   @Get('me') @Header('Cache-Control', 'no-store') @ApiBearerAuth() @UseGuards(JwtAuthGuard)
   me(@Req() req: PartnerRequest) { return this.partners.getData(userId(req)); }

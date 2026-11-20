@@ -236,10 +236,10 @@ export class BillingService {
         current.activeUntil.getTime() > now &&
         current.plan && current.period
       ) {
-        const currentPrice = priceFor(current.plan, current.period);
-        const requestedPrice = priceFor(dto.plan, dto.period);
+        const currentLevel = PLANS.findIndex(p => p.id === current.plan);
+        const requestedLevel = PLANS.findIndex(p => p.id === dto.plan);
 
-        if (requestedPrice < currentPrice) {
+        if (requestedLevel < currentLevel) {
           throw new BadRequestException(
             'Нельзя перейти на более дешёвый тариф до окончания текущей подписки.',
           );
@@ -347,6 +347,8 @@ export class BillingService {
         kind: 'PAID' as const,
         plan: order.plan,
         period: order.period,
+        usageAnchorAt: current?.kind === 'PAID' && current.activeUntil > now
+          ? current.usageAnchorAt ?? current.createdAt : now,
       };
       if (current)
         await tx.subscription.update({ where: { id: current.id }, data });
@@ -432,6 +434,6 @@ export class BillingService {
     const newPricePerDay = newPrice / newPeriodDays;
     const convertedDays = remainingValue / newPricePerDay;
 
-    return new Date(now.getTime() + Math.max(0, convertedDays) * DAY);
+    return new Date(fullExtension.getTime() + Math.max(0, convertedDays) * DAY);
   }
 }

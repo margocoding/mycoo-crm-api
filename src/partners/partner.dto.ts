@@ -1,5 +1,6 @@
 import { Transform } from 'class-transformer';
 import { IsIn, IsInt, IsISO8601, IsNumber, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
+import type { PartnerPayoutFrequency } from '../../generated/prisma/client.js';
 
 const trim = () => Transform(({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value);
 const MAX_RUB = 21_474_836.47;
@@ -59,6 +60,8 @@ export class PartnerTermsDto {
   @IsInt() @Min(1) @Max(120) eligibleMonths: number;
   @IsInt() @Min(0) @Max(365) holdDays: number;
   @IsNumber({ maxDecimalPlaces: 2 }) @Min(0.01) @Max(MAX_RUB) minimumPayout: number;
+  @IsOptional() @IsIn(['WEEKLY', 'MONTHLY', 'QUARTERLY', 'YEARLY']) payoutFrequency?: PartnerPayoutFrequency;
+  @IsOptional() @IsString() @Matches(/^\d{4}-\d{2}-\d{2}$/) @IsISO8601({ strict: true }) payoutAnchorDate?: string;
 }
 
 export class PartnerAdminLoginDto {

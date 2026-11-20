@@ -1,4 +1,6 @@
 import 'reflect-metadata';
+import { HttpException } from '@nestjs/common';
+import { usageFixture } from '../../test/usage.fixture.js';
 import { describe, expect, it, vi } from 'vitest';
 import { MeetingsWorker } from './meetings.worker.js';
 import type { PrismaService } from '../../prisma/prisma.service.js';
@@ -9,6 +11,9 @@ import type { ConfigService } from '@nestjs/config';
 function fixture(status = 'completed') {
   const meeting: any = {
     id: 'm1',
+    workspaceId: 'company',
+    departmentId: 'department',
+    organizerId: 'owner',
     roomName: 'meeting_one',
     status,
     transcript: '',
@@ -26,6 +31,8 @@ function fixture(status = 'completed') {
     uploadId: null,
     speechTaskId: null,
     transcript: null,
+    sizeBytes: 1000n,
+    durationSeconds: 60,
   };
   const db: any = {
     meetingRecording: {
@@ -66,16 +73,35 @@ function fixture(status = 'completed') {
   };
   db.$transaction = async (fn: any) => fn(db);
   const calls = { configured: false, request: vi.fn() };
+  const usage = usageFixture();
   const make = () =>
     new MeetingsWorker(
       db as PrismaService,
       calls as unknown as CallsClient,
       {} as GigachatService,
       {} as ConfigService,
+      usage,
     );
-  return { meeting, recording, db, calls, make };
+  return { meeting, recording, db, calls, usage, make };
 }
 describe('Meeting processing recovery', () => {
+  it('does not contact recognition when the shared AI budget is exhausted', async () => {
+    const f = fixture();
+    f.calls.request.mockResolvedValue({ sizeBytes: 1000, audioSeconds: 60, provider: 'yandex' });
+    vi.mocked(f.usage.reserve).mockRejectedValue(new HttpException({ code: 'USAGE_LIMIT_REACHED', message: 'Лимит бюджета.' }, 403));
+    await f.make().recording('r1');
+    expect(f.recording.status).toBe('failed');
+    expect(f.recording.error).toBe('Лимит бюджета.');
+    expect(f.calls.request.mock.calls.map(c => c[1])).toEqual(['/recordings/info']);
+  });
+  it('does not reserve recognition funds for a legacy file beyond the download ceiling', async () => {
+    const f = fixture();
+    f.calls.request.mockResolvedValue({ sizeBytes: 2_100_000_000, audioSeconds: 60, provider: 'yandex' });
+    await f.make().recording('r1');
+    expect(f.usage.reserve).not.toHaveBeenCalled();
+    expect(f.calls.request.mock.calls.map(c => c[1])).toEqual(['/recordings/info']);
+    expect(f.recording.sizeBytes).toBe(2_100_000_000n);
+  });
   it('saves a stopped fragment before recognition so the scan can start the next one', async () => {
     const f = fixture('live');
     Object.assign(f.recording, {
@@ -91,7 +117,8 @@ describe('Meeting processing recovery', () => {
         files: [{ filename: 'meetings/meeting_one/segment_r1.mp4' }],
       },
     ];
-    f.calls.request.mockResolvedValue(completed);
+    f.calls.request.mockImplementation(async (_room, path) => path === '/recordings/info'
+      ? { sizeBytes: 1000, audioSeconds: 60, provider: 'salute' } : completed);
     await f.make().recording('r1');
     expect(f.recording.status).toBe('transcribing');
     expect(f.calls.request).toHaveBeenCalledWith(
@@ -174,10 +201,9 @@ describe('Meeting processing recovery', () => {
   });
   it('resumes upload, task and result across worker instances without needing Egress again', async () => {
     const f = fixture();
-    f.calls.request
-      .mockResolvedValueOnce({ uploadId: 'uploaded' })
-      .mockResolvedValueOnce({ taskId: 'recognition' })
-      .mockResolvedValueOnce({ taskId: 'recognition', text: 'Обсудили план.' });
+    const responses = [{ uploadId: 'uploaded' }, { taskId: 'recognition' }, { taskId: 'recognition', text: 'Обсудили план.' }];
+    f.calls.request.mockImplementation(async (_room, path) => path === '/recordings/info'
+      ? { sizeBytes: 1000, audioSeconds: 60, provider: 'salute' } : responses.shift());
     await f.make().recording('r1');
     expect(f.recording.uploadId).toBe('uploaded');
     await f.make().recording('r1');
@@ -187,17 +213,18 @@ describe('Meeting processing recovery', () => {
     expect(f.meeting.analysisStatus).toBe('queued');
     expect(
       f.calls.request.mock.calls.every(
-        (c: any[]) => c[1] === '/recordings/transcribe',
+        (c: any[]) => ['/recordings/info', '/recordings/transcribe'].includes(c[1]),
       ),
     ).toBe(true);
-    expect(f.calls.request.mock.calls[2][3]).toMatchObject({
+    expect(f.calls.request.mock.calls.filter(c => c[1] === '/recordings/transcribe')[2][3]).toMatchObject({
       uploadId: 'uploaded',
       taskId: 'recognition',
     });
   });
   it('queues a transcript when a meeting ends after the recording has already finished', async () => {
     const f = fixture('live');
-    f.calls.request.mockResolvedValue({ text: 'Итог' });
+    f.calls.request.mockImplementation(async (_room, path) => path === '/recordings/info'
+      ? { sizeBytes: 1000, audioSeconds: 60, provider: 'salute' } : { taskId: 'recognized', text: 'Итог' });
     await f.make().recording('r1');
     expect(f.meeting.analysisStatus).toBe('none');
     f.meeting.status = 'completed';
@@ -209,7 +236,8 @@ describe('Meeting processing recovery', () => {
     const f = fixture();
     f.meeting.transcriptSource = 'manual';
     f.meeting.transcript = 'Правка руководителя';
-    f.calls.request.mockResolvedValue({ text: 'Автоматическая версия' });
+    f.calls.request.mockImplementation(async (_room, path) => path === '/recordings/info'
+      ? { sizeBytes: 1000, audioSeconds: 60, provider: 'salute' } : { taskId: 'recognized', text: 'Автоматическая версия' });
     await f.make().recording('r1');
     expect(f.meeting.transcript).toBe('Правка руководителя');
   });

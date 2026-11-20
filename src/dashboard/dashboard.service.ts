@@ -151,7 +151,7 @@ export class DashboardService implements OnModuleInit {
       const snapshot = await this.prisma.dashboardSnapshot.findUniqueOrThrow({ where: { scopeKey },
         include: { workspace: true, department: true } });
       const { context, period } = await this.context(snapshot);
-      const analysis = await this.gigachat.analyzeDashboard(context);
+      const analysis = await this.gigachat.analyzeDashboard(context, { workspaceId: snapshot.workspaceId, departmentId: snapshot.departmentId, source: 'dashboard' });
       if (!context.goal || context.week.total === 0) {
         analysis.goalProgress = null;
         analysis.goalExplanation = !context.goal ? 'Укажите цель компании для оценки прогресса.' : 'За последние 7 дней нет задач для оценки прогресса.';
